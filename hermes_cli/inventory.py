@@ -120,6 +120,7 @@ def build_models_payload(
     canonical_order: bool = False,
     pricing: bool = False,
     capabilities: bool = False,
+    featured: bool = False,
     force_fresh_nous_tier: bool = False,
     refresh: bool = False,
     probe_custom_providers: bool = True,
@@ -152,6 +153,12 @@ def build_models_payload(
       ``{model: {fast, reasoning}}`` so pickers can gate the model-options
       controls (fast toggle / reasoning) to what each model actually
       supports, instead of offering knobs the backend would reject.
+    - ``featured``: add a per-row ``featured_models`` list — one flagship per
+      lab (the newest by models.dev release_date, ranked within the row's own
+      models) for aggregator providers that serve dozens of models across many
+      labs. Pickers default their visible set to these; the rest of ``models``
+      stays reachable via search / show-all. Empty for single-lab providers
+      (callers fall back to top-N). Derived live from models.dev — no allowlist.
     - ``force_fresh_nous_tier``: bypass the short Nous free-tier cache when
       selecting Portal-recommended Nous models and applying tier gating. Keep
       this false for UI picker opens; explicit auth/model flows can opt in
@@ -262,6 +269,8 @@ def build_models_payload(
         _apply_pricing(rows, force_fresh_nous_tier=force_fresh_nous_tier)
     if capabilities:
         _apply_capabilities(rows)
+    if featured:
+        _apply_featured(rows)
 
     return {
         "providers": rows,
@@ -296,6 +305,7 @@ def build_model_options_payload(
         canonical_order=True,
         pricing=True,
         capabilities=True,
+        featured=True,
         refresh=refresh,
         probe_custom_providers=refresh,
         probe_current_custom_provider=not refresh,
@@ -426,6 +436,64 @@ def _apply_capabilities(rows: list[dict]) -> None:
             }
 
         row["capabilities"] = caps
+
+
+def _apply_featured(rows: list[dict]) -> None:
+    """Attach a ``featured_models`` shortlist to each aggregator provider row.
+
+    Aggregator providers (nous, openrouter) serve dozens of models across many
+    labs, so a flat "top-N" default would drop whole labs from the picker.
+    Instead we surface one flagship per lab: within each lab (the vendor segment
+    of a ``vendor/model`` id) pick the model with the most recent models.dev
+    ``release_date``, ranked among that row's OWN models — never against the
+    current date, so the choice is stable as models age. Same-date ties (and
+    labs whose models lack a date) fall back to the row's curated order, which
+    is already flagship-first, so no lab drops out of the default view.
+
+    Derived live from the models.dev catalog already loaded on this path (same
+    source as pricing/capabilities) — there is no hand-maintained allowlist to
+    keep in sync. Non-aggregator providers (a single lab, local endpoints,
+    custom proxies) get an empty list and callers fall back to their existing
+    top-N behaviour; splitting one lab into a shortlist would just hide models.
+    """
+    try:
+        from agent.models_dev import get_model_info
+    except Exception:
+        get_model_info = None  # type: ignore[assignment]
+
+    for row in rows:
+        slug = str(row.get("slug") or "").strip().lower()
+        models = row.get("models") or []
+
+        # Group models by lab; only multi-lab aggregators get a shortlist.
+        by_lab: dict[str, list[tuple[int, str, str]]] = {}
+        for pos, model in enumerate(models):
+            lab = model.split("/", 1)[0] if "/" in model else ""
+            if not lab:
+                # No vendor prefix → single-namespace provider, not an
+                # aggregator. Bail on the whole row (see below).
+                by_lab = {}
+                break
+            date = ""
+            if get_model_info is not None:
+                info = get_model_info(slug, model) or get_model_info("openrouter", model)
+                date = getattr(info, "release_date", "") if info else ""
+            by_lab.setdefault(lab, []).append((pos, date, model))
+
+        # A shortlist only makes sense when the row spans several labs.
+        if len(by_lab) < 2:
+            row["featured_models"] = []
+            continue
+
+        featured: list[str] = []
+        for entries in by_lab.values():
+            # Newest release_date wins; earlier list position breaks ties and is
+            # the sole key when a lab has no dated models (max("") is "").
+            best = max(entries, key=lambda e: (e[1], -e[0]))
+            featured.append(best[2])
+        # Preserve the row's model order for stable rendering.
+        order = {m: i for i, m in enumerate(models)}
+        row["featured_models"] = sorted(featured, key=lambda m: order[m])
 
 
 # ─── Internal: row post-processing ──────────────────────────────────────

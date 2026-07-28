@@ -1031,3 +1031,93 @@ def test_list_authenticated_providers_refresh_busts_cache():
         assert clear.call_count == 0
         model_switch.list_authenticated_providers(refresh=True)
         assert clear.call_count == 1
+
+
+# ─── _apply_featured (one-flagship-per-lab shortlist) ──────────────────
+
+
+class _FakeInfo:
+    def __init__(self, release_date: str) -> None:
+        self.release_date = release_date
+
+
+def _apply_featured_with_dates(rows, dates: dict[str, str]):
+    """Run _apply_featured with a deterministic models.dev stub."""
+    from hermes_cli import inventory
+
+    def _fake_get_model_info(provider, model):
+        return _FakeInfo(dates[model]) if model in dates else None
+
+    with patch("agent.models_dev.get_model_info", side_effect=_fake_get_model_info):
+        inventory._apply_featured(rows)
+
+
+def test_apply_featured_picks_newest_per_lab():
+    """One model per lab wins: the most recent release_date within that lab."""
+    rows = [
+        {
+            "slug": "nous",
+            "models": [
+                "anthropic/opus",
+                "anthropic/haiku",
+                "google/gemini-pro",
+                "google/gemini-flash",
+            ],
+        }
+    ]
+    _apply_featured_with_dates(
+        rows,
+        {
+            "anthropic/opus": "2026-07-01",
+            "anthropic/haiku": "2026-03-01",
+            "google/gemini-pro": "2026-02-01",
+            "google/gemini-flash": "2026-05-01",
+        },
+    )
+    # opus newest for anthropic; flash newest for google. One per lab, in
+    # the row's original model order.
+    assert rows[0]["featured_models"] == ["anthropic/opus", "google/gemini-flash"]
+
+
+def test_apply_featured_ranks_within_list_not_against_now():
+    """The pick is the newest *in the list*, even if every model is old —
+    the current date never enters the comparison."""
+    rows = [{"slug": "nous", "models": ["a/one", "a/two", "b/three"]}]
+    _apply_featured_with_dates(
+        rows,
+        {"a/one": "2019-01-01", "a/two": "2020-01-01", "b/three": "2018-06-01"},
+    )
+    assert rows[0]["featured_models"] == ["a/two", "b/three"]
+
+
+def test_apply_featured_tie_breaks_on_list_order():
+    """Same release_date within a lab falls back to curated (earliest) order."""
+    rows = [{"slug": "openai-agg", "models": ["x/flagship", "x/other", "y/solo"]}]
+    _apply_featured_with_dates(
+        rows,
+        {"x/flagship": "2026-07-09", "x/other": "2026-07-09", "y/solo": "2026-01-01"},
+    )
+    assert rows[0]["featured_models"] == ["x/flagship", "y/solo"]
+
+
+def test_apply_featured_undated_lab_falls_back_to_list_order():
+    """A lab whose models have no models.dev date still yields its first one."""
+    rows = [{"slug": "nous", "models": ["a/first", "a/second", "b/only"]}]
+    _apply_featured_with_dates(rows, {"b/only": "2026-01-01"})  # a/* undated
+    assert rows[0]["featured_models"] == ["a/first", "b/only"]
+
+
+def test_apply_featured_empty_for_single_lab_provider():
+    """A provider serving one lab is not an aggregator — no shortlist, so the
+    caller falls back to top-N instead of hiding models."""
+    rows = [{"slug": "deepseek", "models": ["deepseek-v4-pro", "deepseek-v4-flash"]}]
+    _apply_featured_with_dates(rows, {})
+    assert rows[0]["featured_models"] == []
+
+
+def test_apply_featured_empty_for_prefixless_models():
+    """Models with no vendor/ prefix (ollama, custom endpoints) get no
+    shortlist — there are no labs to split on."""
+    rows = [{"slug": "ollama", "models": ["qwen3:latest", "llama3.2:latest"]}]
+    _apply_featured_with_dates(rows, {})
+    assert rows[0]["featured_models"] == []
