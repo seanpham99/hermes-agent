@@ -33,9 +33,11 @@ function readPosition(): PopoutPosition {
     const parsed = JSON.parse(raw) as Partial<PopoutPosition>
 
     if (typeof parsed.bottom === 'number' && typeof parsed.right === 'number') {
-      // Clamp on load — a position persisted on a larger/other monitor must not
-      // strand the box off-screen on this one.
-      return clampPosition({ bottom: parsed.bottom, right: parsed.right })
+      // Stored UNCLAMPED — this is intent, not a placement. Every surface
+      // clamps it against its own rect at mount (see clampPopoutPosition), so a
+      // position saved on a bigger monitor still lands on-screen here without
+      // the load path having to guess which surface it belongs to.
+      return { bottom: parsed.bottom, right: parsed.right }
     }
   } catch {
     // Corrupt value — fall back to the default corner.
@@ -79,10 +81,17 @@ const clampRange = (value: number, lo: number, hi: number) => Math.min(Math.max(
 
 const rootFontSize = () => parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
 
+/** The chat surface a composer belongs to — the element whose rect bounds its
+ *  floating box. Resolved from the composer's OWN surface root, so each mounted
+ *  chat surface (primary, session tile, background tab) gets its own area
+ *  instead of a document-wide first match. */
+export const popoutBoundsElement = (composer: Element | null): Element | null =>
+  (composer?.closest('[data-chat-surface]') ?? document).querySelector('[data-slot="composer-bounds"]')
+
 /** The thread area's viewport rect (excludes a pinned sidebar + the header), or
  *  undefined before it mounts — callers then fall back to the full window. */
 export function readPopoutBounds(composer: Element | null): PopoutBounds | undefined {
-  const el = (composer?.parentElement ?? document).querySelector('[data-slot="composer-bounds"]')
+  const el = popoutBoundsElement(composer)
 
   if (!el) {
     return undefined
@@ -95,10 +104,22 @@ export function readPopoutBounds(composer: Element | null): PopoutBounds | undef
   return width > 0 && height > 0 ? { bottom, left, right, top } : undefined
 }
 
-// Bound the bottom/right inset so the WHOLE box stays inside `area` (the thread
-// region, or the window by default) — the corner anchor alone would let the
-// box's width/height push it past the opposite edges.
-function clampPosition({ bottom, right }: PopoutPosition, size?: PopoutSize, area?: PopoutBounds): PopoutPosition {
+/**
+ * Bound the bottom/right inset so the WHOLE box stays inside `area` (the chat
+ * surface's region, or the window by default) — the corner anchor alone would
+ * let the box's width/height push it past the opposite edges.
+ *
+ * PURE and per-surface: the shared atom holds the user's INTENT (one drag
+ * position for every chat surface), and each mounted composer runs it through
+ * here against its own rect to get the placement it actually renders. Tabs are
+ * keep-alive mounted, so clamping into the shared atom instead would have every
+ * surface overwrite the others with a value bounded by ITS geometry.
+ */
+export function clampPopoutPosition(
+  { bottom, right }: PopoutPosition,
+  size?: PopoutSize,
+  area?: PopoutBounds
+): PopoutPosition {
   const width = size?.width || POPOUT_WIDTH_REM * rootFontSize()
   const height = size?.height || MIN_VISIBLE_HEIGHT
   const { innerHeight: vh, innerWidth: vw } = window
@@ -111,6 +132,11 @@ function clampPosition({ bottom, right }: PopoutPosition, size?: PopoutSize, are
 }
 
 export const $composerPoppedOut = atom(storedBoolean(POPOUT_ENABLED_STORAGE_KEY, false))
+
+/** The user's intended pop-out placement — shared by every chat surface and
+ *  persisted, so dragging the composer in one tab moves it in all of them.
+ *  Deliberately UNCLAMPED: a surface renders `clampPopoutPosition(intent, …)`,
+ *  never this value directly. */
 export const $composerPopoutPosition = atom<PopoutPosition>(readPosition())
 
 export function setComposerPoppedOut(value: boolean) {
@@ -121,12 +147,15 @@ export function setComposerPoppedOut(value: boolean) {
 /** Move the box (state only by default). Used per-frame during a drag — no IO
  *  unless `persist`. Returns the clamped position so callers can sync their live
  *  ref. Pass the measured `size` for exact bounds; otherwise a fallback keeps it
- *  on-screen. */
+ *  on-screen.
+ *
+ *  Only a DRAG calls this: it's the one moment a single surface speaks for the
+ *  shared intent, because the user is pointing at that surface. */
 export function setComposerPopoutPosition(
   position: PopoutPosition,
   { area, persist, size }: SetPositionOptions = {}
 ): PopoutPosition {
-  const next = clampPosition(position, size, area)
+  const next = clampPopoutPosition(position, size, area)
   $composerPopoutPosition.set(next)
 
   if (persist) {
