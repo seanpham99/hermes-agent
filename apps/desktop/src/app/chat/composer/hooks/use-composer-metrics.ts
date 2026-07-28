@@ -92,8 +92,8 @@ export function useComposerMetrics({ composerRef, composerSurfaceRef, editorRef,
 
     // Floating composer is out of the thread's flow — it must not reserve any
     // bottom clearance. Zero the measured vars so the thread reclaims the space.
-    // (Read globals here so the callback stays stable; mirror the popoutAllowed
-    // gate since secondary windows are forced docked.)
+    // (Read globals here so the callback stays stable; mirror the secondary-window
+    // gate, since those windows are forced docked.)
     if ($composerPoppedOut.get() && !isSecondaryWindow()) {
       lastBucketedHeightRef.current = 0
       lastBucketedSurfaceHeightRef.current = 0
