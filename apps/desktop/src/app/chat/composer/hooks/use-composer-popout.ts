@@ -1,13 +1,13 @@
 import { useStore } from '@nanostores/react'
-import { type RefObject, useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
-import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
+import { usePaneGroup, usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { useResizeObserver } from '@/hooks/use-resize-observer'
 import { triggerHaptic } from '@/lib/haptics'
 import {
-  $composerPopoutPosition,
-  $composerPoppedOut,
+  $composerPopoutZone,
   clampPopoutPosition,
+  getComposerPopoutZone,
   popoutBoundsElement,
   type PopoutPosition,
   readPopoutBounds,
@@ -22,15 +22,15 @@ interface UseComposerPopoutOptions {
 }
 
 /**
- * This surface's on-screen placement, derived from the shared drag intent.
+ * This surface's on-screen placement, derived from its zone's drag intent.
  *
- * The atom is one value for the whole window — dragging the composer in any tab
- * moves it in all of them. But each chat surface owns a different rect (the
- * primary, a tile beside it, a background tab in the same stack), so the same
- * intent has to be clamped per surface. Clamping into the atom instead would
- * have every keep-alive-mounted tab overwrite the others with a position
- * bounded by ITS geometry, and the last one to run would win — which is exactly
- * how a drag in one tab used to get lost in another.
+ * The zone stores one intent for its whole tab stack — drag the box in any tab
+ * and it moves in all of them. But each surface owns a different rect (the
+ * active tab, a background tab mid-resize), so the intent is clamped per
+ * surface. Clamping into the store instead would have every keep-alive-mounted
+ * tab overwrite the others with a position bounded by ITS geometry, and the
+ * last one to run would win — which is exactly how a drag in one tab used to
+ * get lost in another.
  *
  * While THIS surface is dragging, the gesture already clamped against this
  * rect, so the intent is the placement — re-deriving would only add a forced
@@ -42,6 +42,7 @@ interface UseComposerPopoutOptions {
  */
 function usePopoutPlacement(
   composerRef: RefObject<HTMLFormElement | null>,
+  groupId: string,
   intent: PopoutPosition,
   dragging: boolean,
   poppedOut: boolean
@@ -68,12 +69,12 @@ function usePopoutPlacement(
     }
 
     const size = { height: el.offsetHeight, width: el.offsetWidth }
-    const next = clampPopoutPosition($composerPopoutPosition.get(), size, readPopoutBounds(el))
+    const next = clampPopoutPosition(getComposerPopoutZone(groupId).position, size, readPopoutBounds(el))
 
     // Bail on an unchanged placement: a sash drag resizes the surface every
     // frame, and a fresh object each time re-renders the whole composer.
     setPlacement(prev => (prev.bottom === next.bottom && prev.right === next.right ? prev : next))
-  }, [composerRef])
+  }, [composerRef, groupId])
 
   // The surface resizing (sash drag, sidebar open, tab split) re-places the box
   // against its new rect; the composer resizing (a growing draft) re-places it
@@ -113,33 +114,35 @@ function usePopoutPlacement(
 }
 
 /**
- * Pop-out engine: the docked↔floating state (a shared, persisted atom), the
- * dock/float/toggle actions, the drag gestures, and this surface's placement.
- * Every chat surface participates — the primary thread, a session tile, a tab
- * in a stack — so the floating composer follows you across tabs and splits
- * instead of only existing in the main one.
+ * Pop-out engine: the docked↔floating state, the dock/float/toggle actions, the
+ * drag gestures, and this surface's placement.
+ *
+ * State is scoped to the surface's layout ZONE (its tab stack): tabs in the same
+ * zone share one float, so switching tabs keeps the box exactly where you put
+ * it, while a split zone beside them keeps its own — popping out on the left
+ * doesn't fling a composer out of the right.
  *
  * Secondary windows (the tiny Ctrl+Shift+N window, subagent watch windows) stay
- * docked: a floating composer makes no sense in a scratch window, and the
- * shared atom would yank it out of the main window's control.
+ * docked: a floating composer makes no sense in a scratch window.
  */
 export function useComposerPopout({ composerRef }: UseComposerPopoutOptions) {
   const popoutAllowed = !isSecondaryWindow()
-  const poppedOut = useStore($composerPoppedOut) && popoutAllowed
-  const popoutIntent = useStore($composerPopoutPosition)
+  const groupId = usePaneGroup()
+  const zone = useStore(useMemo(() => $composerPopoutZone(groupId), [groupId]))
+  const poppedOut = zone.poppedOut && popoutAllowed
 
   const handleComposerPopOut = useCallback(() => {
     triggerHaptic('open')
-    setComposerPoppedOut(true)
-  }, [])
+    setComposerPoppedOut(groupId, true)
+  }, [groupId])
 
   const handleComposerDock = useCallback(() => {
     triggerHaptic('success')
-    setComposerPoppedOut(false)
-  }, [])
+    setComposerPoppedOut(groupId, false)
+  }, [groupId])
 
   // Double-click the grab area toggles dock/float. Undocking restores the last
-  // position (the persisted atom is never cleared on dock).
+  // position (a zone's stored position is never cleared on dock).
   const handleComposerToggle = useCallback(() => {
     poppedOut ? handleComposerDock() : handleComposerPopOut()
   }, [handleComposerDock, handleComposerPopOut, poppedOut])
@@ -150,13 +153,14 @@ export function useComposerPopout({ composerRef }: UseComposerPopoutOptions) {
     onPointerDown: onComposerGesturePointerDown
   } = useComposerPopoutGestures({
     composerRef,
+    groupId,
     onDock: handleComposerDock,
     onPopOut: handleComposerPopOut,
     poppedOut,
-    position: popoutIntent
+    position: zone.position
   })
 
-  const popoutPosition = usePopoutPlacement(composerRef, popoutIntent, dragging, poppedOut)
+  const popoutPosition = usePopoutPlacement(composerRef, groupId, zone.position, dragging, poppedOut)
 
   return {
     dockProximity,

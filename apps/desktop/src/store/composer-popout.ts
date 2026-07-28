@@ -1,9 +1,14 @@
-import { atom } from 'nanostores'
+import { atom, computed, type ReadableAtom } from 'nanostores'
 
-import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
+import { persistString, storedString } from '@/lib/storage'
 
-const POPOUT_ENABLED_STORAGE_KEY = 'hermes.desktop.composerPopout.enabled'
-const POPOUT_POSITION_STORAGE_KEY = 'hermes.desktop.composerPopout.position'
+const POPOUT_STORAGE_KEY = 'hermes.desktop.composerPopout.zones.v1'
+
+// Pre-zone keys: one flag + one position for the whole window. Read once at
+// load so an existing float carries over as the seed for every zone (see
+// `load`), then never written again.
+const LEGACY_ENABLED_KEY = 'hermes.desktop.composerPopout.enabled'
+const LEGACY_POSITION_KEY = 'hermes.desktop.composerPopout.position'
 
 /** Where the floating composer's bottom-right corner sits, measured as an inset
  *  from the viewport's bottom/right edges. Anchoring to the bottom-right keeps
@@ -14,6 +19,14 @@ export interface PopoutPosition {
   right: number
 }
 
+/** One layout zone's pop-out state. */
+export interface PopoutZoneState {
+  poppedOut: boolean
+  /** The user's intended placement for this zone, UNCLAMPED — every surface in
+   *  the zone renders `clampPopoutPosition` of it against its own rect. */
+  position: PopoutPosition
+}
+
 // Floating composer width (rem). Shared by the inline style that sets
 // --composer-popout-width and the peel-off drag math.
 export const POPOUT_WIDTH_REM = 19.5
@@ -22,29 +35,103 @@ export const POPOUT_WIDTH_REM = 19.5
 // of the window chrome. Matches the brief's "default to the right bottom".
 const DEFAULT_POSITION: PopoutPosition = { bottom: 24, right: 24 }
 
-function readPosition(): PopoutPosition {
-  const raw = storedString(POPOUT_POSITION_STORAGE_KEY)
+const DEFAULT_ZONE: PopoutZoneState = { poppedOut: false, position: DEFAULT_POSITION }
+
+const isPosition = (value: unknown): value is PopoutPosition => {
+  const r = value as Partial<PopoutPosition> | null
+
+  return Boolean(r) && typeof r?.bottom === 'number' && typeof r?.right === 'number'
+}
+
+/** The pre-zone position, if the user had one. Seeds every zone so an existing
+ *  float doesn't jump to the default corner on upgrade. */
+function legacyPosition(): PopoutPosition {
+  const raw = storedString(LEGACY_POSITION_KEY)
 
   if (!raw) {
     return DEFAULT_POSITION
   }
 
   try {
-    const parsed = JSON.parse(raw) as Partial<PopoutPosition>
+    const parsed = JSON.parse(raw) as unknown
 
-    if (typeof parsed.bottom === 'number' && typeof parsed.right === 'number') {
-      // Stored UNCLAMPED — this is intent, not a placement. Every surface
-      // clamps it against its own rect at mount (see clampPopoutPosition), so a
-      // position saved on a bigger monitor still lands on-screen here without
-      // the load path having to guess which surface it belongs to.
-      return { bottom: parsed.bottom, right: parsed.right }
-    }
+    return isPosition(parsed) ? { bottom: parsed.bottom, right: parsed.right } : DEFAULT_POSITION
   } catch {
-    // Corrupt value — fall back to the default corner.
+    return DEFAULT_POSITION
+  }
+}
+
+function load(): Record<string, PopoutZoneState> {
+  const raw = storedString(POPOUT_STORAGE_KEY)
+
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+
+      if (parsed && typeof parsed === 'object') {
+        const out: Record<string, PopoutZoneState> = {}
+
+        for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+          const zone = value as Partial<PopoutZoneState> | null
+
+          if (typeof zone?.poppedOut === 'boolean' && isPosition(zone.position)) {
+            out[id] = {
+              poppedOut: zone.poppedOut,
+              position: { bottom: zone.position.bottom, right: zone.position.right }
+            }
+          }
+        }
+
+        return out
+      }
+    } catch {
+      // Treat unparseable persisted state as missing.
+    }
   }
 
-  return DEFAULT_POSITION
+  return {}
 }
+
+/** Every zone's pop-out state, keyed by layout-tree group id.
+ *
+ *  A GROUP is one stack of tabs, so this is the scope the user experiences:
+ *  tabs in the same zone share a float (switch tabs, the box stays where you
+ *  put it), while a split zone beside them keeps its own — popping out on the
+ *  left doesn't fling a composer out of the right. */
+export const $composerPopoutZones = atom<Record<string, PopoutZoneState>>(load())
+
+/** Write-through to storage. Called explicitly — NOT on every store change: a
+ *  drag updates the position once per frame, and serializing every zone to
+ *  localStorage at 60Hz is exactly the IO the drag path was built to avoid. */
+const persistZones = () => persistString(POPOUT_STORAGE_KEY, JSON.stringify($composerPopoutZones.get()))
+
+/** Whether the user had a float before zones existed. Seeds a zone's first read
+ *  so an upgrade doesn't silently dock someone who left their composer floating
+ *  — but ONLY until they touch any zone. Once real per-zone state exists, that
+ *  is the truth, and a zone split later starts docked like any other. */
+let legacySeed: PopoutZoneState | null =
+  storedString(LEGACY_ENABLED_KEY) === 'true' ? { poppedOut: true, position: legacyPosition() } : null
+
+const zoneState = (zones: Record<string, PopoutZoneState>, groupId: string): PopoutZoneState =>
+  zones[groupId] ?? legacySeed ?? DEFAULT_ZONE
+
+// Cached per-zone derived atoms keep useStore subscriptions referentially stable
+// (and keep one zone's drag from re-rendering the composers in another).
+const zoneCache = new Map<string, ReadableAtom<PopoutZoneState>>()
+
+export function $composerPopoutZone(groupId: string): ReadableAtom<PopoutZoneState> {
+  let cached = zoneCache.get(groupId)
+
+  if (!cached) {
+    cached = computed($composerPopoutZones, zones => zoneState(zones, groupId))
+    zoneCache.set(groupId, cached)
+  }
+
+  return cached
+}
+
+export const getComposerPopoutZone = (groupId: string): PopoutZoneState =>
+  zoneState($composerPopoutZones.get(), groupId)
 
 export interface PopoutSize {
   height: number
@@ -109,11 +196,11 @@ export function readPopoutBounds(composer: Element | null): PopoutBounds | undef
  * surface's region, or the window by default) — the corner anchor alone would
  * let the box's width/height push it past the opposite edges.
  *
- * PURE and per-surface: the shared atom holds the user's INTENT (one drag
- * position for every chat surface), and each mounted composer runs it through
- * here against its own rect to get the placement it actually renders. Tabs are
- * keep-alive mounted, so clamping into the shared atom instead would have every
- * surface overwrite the others with a value bounded by ITS geometry.
+ * PURE and per-surface: a zone stores the user's INTENT, and each mounted
+ * composer in it runs that through here against its own rect to get the
+ * placement it actually renders. Tabs in a zone are keep-alive mounted, so
+ * clamping into the store instead would have every tab overwrite the others
+ * with a value bounded by ITS geometry.
  */
 export function clampPopoutPosition(
   { bottom, right }: PopoutPosition,
@@ -131,36 +218,66 @@ export function clampPopoutPosition(
   }
 }
 
-export const $composerPoppedOut = atom(storedBoolean(POPOUT_ENABLED_STORAGE_KEY, false))
+function patchZone(groupId: string, patch: Partial<PopoutZoneState>) {
+  const zones = $composerPopoutZones.get()
+  const current = zoneState(zones, groupId)
+  const next = { ...current, ...patch }
 
-/** The user's intended pop-out placement — shared by every chat surface and
- *  persisted, so dragging the composer in one tab moves it in all of them.
- *  Deliberately UNCLAMPED: a surface renders `clampPopoutPosition(intent, …)`,
- *  never this value directly. */
-export const $composerPopoutPosition = atom<PopoutPosition>(readPosition())
+  if (
+    next.poppedOut === zones[groupId]?.poppedOut &&
+    next.position.bottom === zones[groupId]?.position.bottom &&
+    next.position.right === zones[groupId]?.position.right
+  ) {
+    return
+  }
 
-export function setComposerPoppedOut(value: boolean) {
-  $composerPoppedOut.set(value)
-  persistBoolean(POPOUT_ENABLED_STORAGE_KEY, value)
+  // The user has now expressed per-zone intent; the pre-zone value stops
+  // standing in for zones they haven't touched.
+  legacySeed = null
+  $composerPopoutZones.set({ ...zones, [groupId]: next })
 }
 
-/** Move the box (state only by default). Used per-frame during a drag — no IO
- *  unless `persist`. Returns the clamped position so callers can sync their live
- *  ref. Pass the measured `size` for exact bounds; otherwise a fallback keeps it
- *  on-screen.
- *
- *  Only a DRAG calls this: it's the one moment a single surface speaks for the
- *  shared intent, because the user is pointing at that surface. */
+export function setComposerPoppedOut(groupId: string, value: boolean) {
+  patchZone(groupId, { poppedOut: value })
+  persistZones()
+}
+
+/** Move this zone's box. Used per-frame during a drag, so it only writes the
+ *  in-memory store by default; pass `persist` for the resting position on
+ *  release. Returns the clamped position so callers can sync their live ref. */
 export function setComposerPopoutPosition(
+  groupId: string,
   position: PopoutPosition,
   { area, persist, size }: SetPositionOptions = {}
 ): PopoutPosition {
   const next = clampPopoutPosition(position, size, area)
-  $composerPopoutPosition.set(next)
+  patchZone(groupId, { position: next })
 
   if (persist) {
-    persistString(POPOUT_POSITION_STORAGE_KEY, JSON.stringify(next))
+    persistZones()
   }
 
   return next
+}
+
+/** Drop state for zones that no longer exist, so a long-lived install doesn't
+ *  accumulate an entry per zone the user ever split and closed. */
+export function pruneComposerPopoutZones(liveGroupIds: Iterable<string>) {
+  const live = new Set(liveGroupIds)
+  const zones = $composerPopoutZones.get()
+  const next: Record<string, PopoutZoneState> = {}
+  let changed = false
+
+  for (const [id, zone] of Object.entries(zones)) {
+    if (live.has(id)) {
+      next[id] = zone
+    } else {
+      changed = true
+    }
+  }
+
+  if (changed) {
+    $composerPopoutZones.set(next)
+    persistZones()
+  }
 }
