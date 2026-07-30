@@ -192,15 +192,13 @@ class HolographicMemoryProvider(MemoryProvider):
             return (
                 "# Holographic Memory\n"
                 "Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
-                "MANDATORY: At session start, call fact_store(action='probe', entity='<name>') for every project/entity the user mentions.\n"
-                "MANDATORY: Before answering, search fact_store(action='search', query='<query>') for relevant stored facts.\n"
+                "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
                 "Use fact_feedback to rate facts after using them (trains trust scores)."
             )
         return (
             f"# Holographic Memory\n"
             f"Active. {total} facts stored with entity resolution and trust scoring.\n"
-            f"MANDATORY: At session start, call fact_store(action='probe', entity='<name>') for every project/entity the user mentions.\n"
-            f"MANDATORY: Before answering, search fact_store(action='search', query='<query>') for relevant stored facts.\n"
+            f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
             f"Use fact_feedback to rate facts after using them (trains trust scores)."
         )
 
