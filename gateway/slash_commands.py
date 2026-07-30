@@ -3484,8 +3484,10 @@ class GatewaySlashCommandsMixin:
         provider.initialize("slash-command-session")
 
         if subcommand == "tree":
+            plugin_dir = Path(__file__).parent.parent / "plugins" / "memory" / "holographic"
+            tree_script = plugin_dir / "scripts" / "holographic_tree.py"
             proc = subprocess.run(
-                [sys.executable, str(_hermes_home / "scripts" / "holographic_tree.py")],
+                [sys.executable, str(tree_script)],
                 capture_output=True, text=True, timeout=30,
             )
             return proc.stdout or proc.stderr or "Tree viewer exited with no output."

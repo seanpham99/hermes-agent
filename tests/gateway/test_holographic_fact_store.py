@@ -241,11 +241,14 @@ class TestHolographicTreeScript:
     """Test the holographic_tree.py script functionality."""
 
     def _import(self, name):
-        """Import from the holographic_tree script, adding its dir to sys.path."""
+        """Import from the holographic_tree script."""
         import importlib.util
+        from pathlib import Path
+        repo_root = Path(__file__).parent.parent.parent
+        script_path = repo_root / "plugins" / "memory" / "holographic" / "scripts" / "holographic_tree.py"
         spec = importlib.util.spec_from_file_location(
             "holographic_tree",
-            "/home/sonpham/.hermes/scripts/holographic_tree.py",
+            str(script_path),
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -402,14 +405,11 @@ class TestMemSlashCommandWiring:
         mock_proc.stdout = "TREE_OUTPUT"
         mock_proc.stderr = ""
 
-        mock_hermes_home = MagicMock()
-        mock_hermes_home.__truediv__.return_value.__truediv__.return_value = "/fake/path/holographic_tree.py"
-
         with patch("subprocess.run", return_value=mock_proc) as mock_run:
-            with patch("gateway.run._hermes_home", mock_hermes_home):
-                with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
-                    res = await runner._handle_mem_command(event)
+            with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
+                res = await runner._handle_mem_command(event)
 
         assert res == "TREE_OUTPUT"
         mock_run.assert_called_once()
-        assert mock_run.call_args[0][0][-1] == "/fake/path/holographic_tree.py"
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[-1].endswith("holographic_tree.py")

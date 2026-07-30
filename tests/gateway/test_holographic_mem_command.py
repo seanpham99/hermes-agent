@@ -89,7 +89,7 @@ async def test_handle_mem_command_tree_subprocess(mock_holographic_provider):
     assert res == "TREE_OUTPUT"
     mock_run.assert_called_once()
     cmd_args = mock_run.call_args[0][0]
-    assert cmd_args[-1] == "/fake/path/holographic_tree.py"
+    assert cmd_args[-1].endswith("holographic_tree.py")
 
 @pytest.mark.asyncio
 async def test_handle_mem_command_probe(mock_holographic_provider):
