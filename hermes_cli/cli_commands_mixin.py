@@ -1852,6 +1852,90 @@ class CLICommandsMixin:
                    "Use: pending, approve <id>, reject <id>, approval <on|off>.")
         print(out)
 
+    def _handle_mem_command(self, cmd: str):
+        """Handle /mem — inspect holographic memory (tree / list / probe / search).
+
+        Mirror of gateway/slash_commands.py._handle_mem_command for
+        interactive CLI/TUI surfaces.
+        """
+        import shlex
+        import subprocess
+        from pathlib import Path
+        from plugins.memory import load_memory_provider, _get_active_memory_provider
+
+        parts = shlex.split(cmd.strip())
+        args = parts[1:] if len(parts) > 1 else []
+        subcommand = args[0] if args else "tree"
+
+        active_name = _get_active_memory_provider()
+        if active_name != "holographic":
+            print(
+                "Holographic memory is not the active memory provider. "
+                f"Active provider is '{active_name or 'none'}'. "
+                "Set memory.provider: holographic in config.yaml to use /mem."
+            )
+            return
+
+        provider = load_memory_provider("holographic")
+        if not provider:
+            print("Failed to load holographic memory provider.")
+            return
+
+        provider.initialize("cli-slash-command-session")
+        try:
+            if subcommand == "tree":
+                plugin_dir = Path(__file__).parent.parent / "plugins" / "memory" / "holographic"
+                tree_script = plugin_dir / "scripts" / "holographic_tree.py"
+                try:
+                    subprocess.run([sys.executable, str(tree_script)], check=False)
+                except Exception as e:
+                    print(f"Error running tree viewer: {e}")
+                return
+
+            if subcommand == "list":
+                output_format = "table"
+                limit = 10
+                remaining = args[1:]
+                i = 0
+                while i < len(remaining):
+                    if remaining[i] in ("--limit", "-n") and i + 1 < len(remaining):
+                        limit = int(remaining[i + 1])
+                        i += 2
+                    elif remaining[i] == "--format" and i + 1 < len(remaining):
+                        output_format = remaining[i + 1]
+                        i += 2
+                    else:
+                        i += 1
+                res = provider.handle_tool_call("fact_store", {
+                    "action": "list",
+                    "output_format": output_format,
+                    "limit": limit,
+                })
+                print(res)
+                return
+
+            if subcommand == "probe" and len(args) >= 2:
+                entity = args[1]
+                res = provider.handle_tool_call("fact_store", {
+                    "action": "probe",
+                    "entity": entity,
+                })
+                print(res)
+                return
+
+            if subcommand == "search" and len(args) >= 2:
+                query = " ".join(args[1:])
+                res = provider.handle_tool_call("fact_store", {
+                    "action": "search",
+                    "query": query,
+                })
+                print(res)
+                return
+
+            print("Unknown /mem subcommand. Use: tree, list, probe <entity>, search <query>.")
+        finally:
+            provider.shutdown()
+
     def _save_write_approval(self, subsystem: str, enabled: bool):
         """Persist <subsystem>.write_approval to config (for /memory|/skills approval)."""
         from cli import save_config_value
