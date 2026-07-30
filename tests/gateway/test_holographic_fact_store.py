@@ -42,8 +42,12 @@ def _make_runner():
 
 @pytest.fixture
 def mock_holographic_provider():
-    with patch("plugins.memory.holographic.HolographicMemoryProvider") as mock:
-        yield mock
+    with patch("plugins.memory.load_memory_provider") as mock_load, \
+         patch("plugins.memory._get_active_memory_provider", return_value="holographic"):
+        mock_provider = MagicMock()
+        mock_provider.handle_tool_call.return_value = "OK"
+        mock_load.return_value = mock_provider
+        yield mock_provider
 
 
 # ── TestFactStoreListTable ───────────────────────────────────────────────
@@ -241,11 +245,14 @@ class TestHolographicTreeScript:
     """Test the holographic_tree.py script functionality."""
 
     def _import(self, name):
-        """Import from the holographic_tree script, adding its dir to sys.path."""
+        """Import from the holographic_tree script."""
         import importlib.util
+        from pathlib import Path
+        repo_root = Path(__file__).parent.parent.parent
+        script_path = repo_root / "plugins" / "memory" / "holographic" / "scripts" / "holographic_tree.py"
         spec = importlib.util.spec_from_file_location(
             "holographic_tree",
-            "/home/sonpham/.hermes/scripts/holographic_tree.py",
+            str(script_path),
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -333,8 +340,7 @@ class TestMemSlashCommandWiring:
     @pytest.mark.asyncio
     async def test_mem_list_dispatch(self, mock_holographic_provider):
         """Test /mem list dispatches to fact_store list with correct args."""
-        mock_p_inst = mock_holographic_provider.return_value
-        mock_p_inst._handle_fact_store.return_value = "TABLE_OUTPUT"
+        mock_holographic_provider.handle_tool_call.return_value = "TABLE_OUTPUT"
 
         runner = _make_runner()
         event = _make_event("/mem list --limit 5 --format table")
@@ -342,20 +348,19 @@ class TestMemSlashCommandWiring:
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
 
-        with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
-            res = await runner._handle_mem_command(event)
+        res = await runner._handle_mem_command(event)
 
         assert res == "TABLE_OUTPUT"
-        call_args = mock_p_inst._handle_fact_store.call_args[0][0]
-        assert call_args["action"] == "list"
-        assert call_args["output_format"] == "table"
-        assert call_args["limit"] == 5
+        mock_holographic_provider.handle_tool_call.assert_called_once_with("fact_store", {
+            "action": "list",
+            "output_format": "table",
+            "limit": 5,
+        })
 
     @pytest.mark.asyncio
     async def test_mem_probe_dispatch(self, mock_holographic_provider):
         """Test /mem probe dispatches to fact_store probe."""
-        mock_p_inst = mock_holographic_provider.return_value
-        mock_p_inst._handle_fact_store.return_value = '{"facts": []}'
+        mock_holographic_provider.handle_tool_call.return_value = '{"facts": []}'
 
         runner = _make_runner()
         event = _make_event("/mem probe tax")
@@ -363,18 +368,17 @@ class TestMemSlashCommandWiring:
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
 
-        with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
-            await runner._handle_mem_command(event)
+        await runner._handle_mem_command(event)
 
-        call_args = mock_p_inst._handle_fact_store.call_args[0][0]
-        assert call_args["action"] == "probe"
-        assert call_args["entity"] == "tax"
+        mock_holographic_provider.handle_tool_call.assert_called_once_with("fact_store", {
+            "action": "probe",
+            "entity": "tax",
+        })
 
     @pytest.mark.asyncio
     async def test_mem_search_dispatch(self, mock_holographic_provider):
         """Test /mem search dispatches to fact_store search."""
-        mock_p_inst = mock_holographic_provider.return_value
-        mock_p_inst._handle_fact_store.return_value = '{"facts": []}'
+        mock_holographic_provider.handle_tool_call.return_value = '{"facts": []}'
 
         runner = _make_runner()
         event = _make_event("/mem search penalty")
@@ -382,12 +386,12 @@ class TestMemSlashCommandWiring:
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
 
-        with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
-            await runner._handle_mem_command(event)
+        await runner._handle_mem_command(event)
 
-        call_args = mock_p_inst._handle_fact_store.call_args[0][0]
-        assert call_args["action"] == "search"
-        assert call_args["query"] == "penalty"
+        mock_holographic_provider.handle_tool_call.assert_called_once_with("fact_store", {
+            "action": "search",
+            "query": "penalty",
+        })
 
     @pytest.mark.asyncio
     async def test_mem_tree_runs_subprocess(self, mock_holographic_provider):
@@ -402,14 +406,11 @@ class TestMemSlashCommandWiring:
         mock_proc.stdout = "TREE_OUTPUT"
         mock_proc.stderr = ""
 
-        mock_hermes_home = MagicMock()
-        mock_hermes_home.__truediv__.return_value.__truediv__.return_value = "/fake/path/holographic_tree.py"
-
         with patch("subprocess.run", return_value=mock_proc) as mock_run:
-            with patch("gateway.run._hermes_home", mock_hermes_home):
-                with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
-                    res = await runner._handle_mem_command(event)
+            with patch("plugins.memory.holographic._load_plugin_config", return_value={}):
+                res = await runner._handle_mem_command(event)
 
         assert res == "TREE_OUTPUT"
         mock_run.assert_called_once()
-        assert mock_run.call_args[0][0][-1] == "/fake/path/holographic_tree.py"
+        cmd_args = mock_run.call_args[0][0]
+        assert cmd_args[-1].endswith("holographic_tree.py")
