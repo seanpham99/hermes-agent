@@ -419,10 +419,13 @@ class MemoryStore:
             return True
 
     def clean(self) -> dict:
-        """Deterministic cleanup: remove junk facts, VACUUM.
+        """Deterministic cleanup: backfill embeddings, remove junk, VACUUM.
 
         Returns a summary dict with counts of operations performed.
         """
+        # Backfill outside lock — embedding is slow, doesn't need lock
+        sbert_count = self.backfill_sbert_vectors()
+
         with self._lock:
             junk_removed = 0
 
@@ -467,6 +470,7 @@ class MemoryStore:
                     pass
 
             return {
+                "sbert_backfilled": sbert_count,
                 "junk_removed": junk_removed,
                 "vacuum_bytes_before": vacuum_before,
                 "vacuum_bytes_after": vacuum_after,
@@ -710,6 +714,40 @@ class MemoryStore:
                 self._rebuild_bank(category)
 
             return len(rows)
+
+    def backfill_sbert_vectors(self) -> int:
+        """Compute SBERT embeddings for facts that don't have them yet.
+
+        Returns the number of facts processed (0 if sentence-transformers
+        unavailable).
+        """
+        from .embeddings import get_embedder, pack_vector
+
+        embed = get_embedder()
+        if embed is None:
+            return 0
+
+        rows = self._conn.execute(
+            "SELECT fact_id, content FROM facts WHERE sbert_vector IS NULL"
+        ).fetchall()
+        if not rows:
+            return 0
+
+        # Batch-embed all missing facts at once (much faster than one-by-one)
+        ids = [row["fact_id"] for row in rows]
+        texts = [row["content"] for row in rows]
+        vectors = embed(texts)
+
+        with self._lock:
+            for fact_id, vec in zip(ids, vectors):
+                blob = pack_vector(vec)
+                self._conn.execute(
+                    "UPDATE facts SET sbert_vector = ? WHERE fact_id = ?",
+                    (blob, fact_id),
+                )
+            self._conn.commit()
+
+        return len(ids)
 
     # ------------------------------------------------------------------
     # Utilities
