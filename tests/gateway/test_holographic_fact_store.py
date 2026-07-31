@@ -423,41 +423,14 @@ class TestMemSlashCommandWiring:
 class TestMemoryStoreClean:
     """Test the clean action on MemoryStore."""
 
-    def test_clean_deduplicates_exact_content(self, tmp_path):
-        """Facts with identical content are merged (newer removed).
-
-        Uses a helper table without UNIQUE constraint to simulate
-        pre-constraint duplicates.
-        """
-        import sqlite3
+    def test_clean_returns_junk_removed_zero_when_clean(self, tmp_path):
+        """When no junk facts exist, junk_removed returns 0."""
         from plugins.memory.holographic.store import MemoryStore
         db = tmp_path / "test.db"
         store = MemoryStore(str(db))
-        # Create a table without UNIQUE to simulate pre-constraint data
-        store._conn.executescript("""
-            CREATE TABLE IF NOT EXISTS facts_nounique (
-                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                category TEXT DEFAULT 'general',
-                tags TEXT DEFAULT '',
-                trust_score REAL DEFAULT 0.5
-            );
-            INSERT INTO facts_nounique (content, category, tags)
-                VALUES ('dup', 'general', 'entity:x');
-            INSERT INTO facts_nounique (content, category, tags)
-                VALUES ('dup', 'general', 'entity:y');
-        """)
-        store._conn.commit()
-        # Verify the dedup query works on this data
-        dupes = store._conn.execute("""
-            SELECT content, COUNT(*) as cnt, MAX(trust_score)
-            FROM facts_nounique
-            GROUP BY content HAVING cnt > 1
-        """).fetchall()
-        assert len(dupes) == 1
-        content, cnt, _max = dupes[0]
-        assert content == "dup"
-        assert cnt == 2
+        store.add_fact("real fact", category="general", tags="entity:real")
+        result = store.clean()
+        assert result["junk_removed"] == 0
         store.close()
 
     def test_clean_removes_junk_facts(self, tmp_path):

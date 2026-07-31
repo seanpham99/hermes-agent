@@ -370,64 +370,27 @@ class MemoryStore:
             return True
 
     def clean(self) -> dict:
-        """Deterministic cleanup: deduplicate, remove junk, VACUUM.
+        """Deterministic cleanup: remove junk facts, VACUUM.
 
         Returns a summary dict with counts of operations performed.
         """
         with self._lock:
-            duplicates_merged = 0
             junk_removed = 0
 
-            # ── Vacuum baseline ──────────────────────────────────────────
-            page_count = self._conn.execute(
-                "PRAGMA page_count"
-            ).fetchone()[0]
-            page_size = self._conn.execute(
-                "PRAGMA page_size"
-            ).fetchone()[0]
+            # Vacuum baseline
+            page_count = self._conn.execute("PRAGMA page_count").fetchone()[0]
+            page_size = self._conn.execute("PRAGMA page_size").fetchone()[0]
             vacuum_before = page_count * page_size
 
-            # ── Deduplicate exact-content facts ───────────────────────────
-            dupes = self._conn.execute("""
-                SELECT content, COUNT(*) as cnt, MAX(trust_score) as max_trust
-                FROM facts
-                GROUP BY content
-                HAVING cnt > 1
-            """).fetchall()
-
-            for content, cnt, max_trust in dupes:
-                keep = self._conn.execute("""
-                    SELECT fact_id FROM facts
-                    WHERE content = ? AND trust_score = ?
-                    ORDER BY fact_id ASC LIMIT 1
-                """, (content, max_trust)).fetchone()
-                if keep is None:
-                    continue
-                keep_id = keep[0]
-                self._conn.execute(
-                    "DELETE FROM fact_entities WHERE fact_id IN "
-                    "(SELECT fact_id FROM facts WHERE content = ? AND fact_id != ?)",
-                    (content, keep_id),
-                )
-                cur = self._conn.execute(
-                    "DELETE FROM facts WHERE content = ? AND fact_id != ?",
-                    (content, keep_id),
-                )
-                duplicates_merged += cur.rowcount
-
-            # ── Remove junk-pattern facts ─────────────────────────────────
+            # Remove junk-pattern facts
             JUNK_TAGS = ("test", "dummy", "probe")
             for tag in JUNK_TAGS:
-                junk = self._conn.execute("""
-                    SELECT fact_id FROM facts
-                    WHERE trust_score <= 0.5
-                      AND (tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)
-                """, (
-                    tag,
-                    f"{tag},%",
-                    f"%,{tag}",
-                    f"%,{tag},%",
-                )).fetchall()
+                junk = self._conn.execute(
+                    """SELECT fact_id FROM facts
+                       WHERE trust_score <= 0.5
+                         AND (tags = ? OR tags LIKE ? OR tags LIKE ? OR tags LIKE ?)""",
+                    (tag, f"{tag},%", f"%,{tag}", f"%,{tag},%"),
+                ).fetchall()
                 for (fid,) in junk:
                     self._conn.execute(
                         "DELETE FROM fact_entities WHERE fact_id = ?", (fid,)
@@ -439,14 +402,12 @@ class MemoryStore:
 
             self._conn.commit()
 
-            # ── VACUUM ────────────────────────────────────────────────────
+            # VACUUM
             self._conn.execute("VACUUM")
-            page_count_after = self._conn.execute(
-                "PRAGMA page_count"
-            ).fetchone()[0]
+            page_count_after = self._conn.execute("PRAGMA page_count").fetchone()[0]
             vacuum_after = page_count_after * page_size
 
-            # ── Rebuild banks after mass mutations ─────────────────────────
+            # Rebuild banks after mass mutations
             categories = self._conn.execute(
                 "SELECT DISTINCT category FROM facts"
             ).fetchall()
@@ -457,7 +418,6 @@ class MemoryStore:
                     pass
 
             return {
-                "duplicates_merged": duplicates_merged,
                 "junk_removed": junk_removed,
                 "vacuum_bytes_before": vacuum_before,
                 "vacuum_bytes_after": vacuum_after,

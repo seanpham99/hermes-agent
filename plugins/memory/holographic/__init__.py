@@ -406,7 +406,6 @@ class HolographicMemoryProvider(MemoryProvider):
                 result = store.clean()
                 summary = (
                     f"Cleaned holographic memory: "
-                    f"{result['duplicates_merged']} duplicates merged, "
                     f"{result['junk_removed']} junk facts removed, "
                     f"database {result['vacuum_bytes_before']} → "
                     f"{result['vacuum_bytes_after']} bytes "
