@@ -59,7 +59,7 @@ FACT_STORE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
+                "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list", "clean"],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
@@ -401,6 +401,18 @@ class HolographicMemoryProvider(MemoryProvider):
             elif action == "remove":
                 removed = store.remove_fact(int(args["fact_id"]))
                 return json.dumps({"removed": removed})
+
+            elif action == "clean":
+                result = store.clean()
+                summary = (
+                    f"Cleaned holographic memory: "
+                    f"{result['duplicates_merged']} duplicates merged, "
+                    f"{result['junk_removed']} junk facts removed, "
+                    f"database {result['vacuum_bytes_before']} → "
+                    f"{result['vacuum_bytes_after']} bytes "
+                    f"({result['vacuum_bytes_before'] - result['vacuum_bytes_after']} reclaimed)"
+                )
+                return json.dumps({"status": "cleaned", "summary": summary, **result})
 
             elif action == "list":
                 output_format = args.get("output_format", "json")
