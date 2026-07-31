@@ -3531,8 +3531,14 @@ class GatewaySlashCommandsMixin:
                     "query": query,
                 })
 
+            if subcommand == "clean":
+                import json
+                res = provider.handle_tool_call("fact_store", {"action": "clean"})
+                result = json.loads(res)
+                return result.get("summary", res)
+
             return ("Unknown /holographic-memory subcommand. Use: tree, list, probe <entity>, "
-                    "search <query>.")
+                    "search <query>, clean.")
         finally:
             provider.shutdown()
 

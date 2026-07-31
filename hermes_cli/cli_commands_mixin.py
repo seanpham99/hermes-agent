@@ -1942,7 +1942,14 @@ class CLICommandsMixin:
                 print(res)
                 return
 
-            print("Unknown /holographic-memory subcommand. Use: tree, list, probe <entity>, search <query>.")
+            if subcommand == "clean":
+                import json
+                res = provider.handle_tool_call("fact_store", {"action": "clean"})
+                result = json.loads(res)
+                print(result.get("summary", res))
+                return
+
+            print("Unknown /holographic-memory subcommand. Use: tree, list, probe <entity>, search <query>, clean.")
         finally:
             provider.shutdown()
 
