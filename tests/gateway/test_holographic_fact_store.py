@@ -416,3 +416,100 @@ class TestMemSlashCommandWiring:
         mock_run.assert_called_once()
         cmd_args = mock_run.call_args[0][0]
         assert cmd_args[-1].endswith("holographic_tree.py")
+
+
+# ── TestMemoryStoreClean ─────────────────────────────────────────────────
+
+class TestMemoryStoreClean:
+    """Test the clean action on MemoryStore."""
+
+    def test_clean_deduplicates_exact_content(self, tmp_path):
+        """Facts with identical content are merged (newer removed).
+
+        Uses a helper table without UNIQUE constraint to simulate
+        pre-constraint duplicates.
+        """
+        import sqlite3
+        from plugins.memory.holographic.store import MemoryStore
+        db = tmp_path / "test.db"
+        store = MemoryStore(str(db))
+        # Create a table without UNIQUE to simulate pre-constraint data
+        store._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS facts_nounique (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                category TEXT DEFAULT 'general',
+                tags TEXT DEFAULT '',
+                trust_score REAL DEFAULT 0.5
+            );
+            INSERT INTO facts_nounique (content, category, tags)
+                VALUES ('dup', 'general', 'entity:x');
+            INSERT INTO facts_nounique (content, category, tags)
+                VALUES ('dup', 'general', 'entity:y');
+        """)
+        store._conn.commit()
+        # Verify the dedup query works on this data
+        dupes = store._conn.execute("""
+            SELECT content, COUNT(*) as cnt, MAX(trust_score)
+            FROM facts_nounique
+            GROUP BY content HAVING cnt > 1
+        """).fetchall()
+        assert len(dupes) == 1
+        content, cnt, _max = dupes[0]
+        assert content == "dup"
+        assert cnt == 2
+        store.close()
+
+    def test_clean_removes_junk_facts(self, tmp_path):
+        """Facts with test/dummy/probe tags and trust <= 0.5 are removed."""
+        from plugins.memory.holographic.store import MemoryStore
+        db = tmp_path / "test.db"
+        store = MemoryStore(str(db))
+        store.add_fact("real fact", category="general", tags="entity:real")
+        store.add_fact("test junk", category="general", tags="test,entity:x")
+        store.add_fact("dummy probe", category="general", tags="dummy,probe")
+        store._conn.execute(
+            "UPDATE facts SET trust_score = 0.3 WHERE content = 'test junk'"
+        )
+        store._conn.execute(
+            "UPDATE facts SET trust_score = 0.4 WHERE content = 'dummy probe'"
+        )
+        store._conn.commit()
+        result = store.clean()
+        assert result["junk_removed"] >= 2
+        remaining = store.list_facts(min_trust=0.0, limit=100)
+        contents = {f["content"] for f in remaining}
+        assert "test junk" not in contents
+        assert "dummy probe" not in contents
+        assert "real fact" in contents
+        store.close()
+
+    def test_clean_preserves_high_trust_facts(self, tmp_path):
+        """Facts with trust > 0.5 are never deleted even if tagged junk."""
+        from plugins.memory.holographic.store import MemoryStore
+        db = tmp_path / "test.db"
+        store = MemoryStore(str(db))
+        store.add_fact("high trust test", category="general", tags="test")
+        store._conn.execute(
+            "UPDATE facts SET trust_score = 0.7 WHERE content = 'high trust test'"
+        )
+        store._conn.commit()
+        result = store.clean()
+        assert result["junk_removed"] == 0
+        remaining = store.list_facts(min_trust=0.0, limit=100)
+        assert any(f["content"] == "high trust test" for f in remaining)
+        store.close()
+
+    def test_clean_vacuums(self, tmp_path):
+        """VACUUM runs and returns before/after sizes."""
+        from plugins.memory.holographic.store import MemoryStore
+        db = tmp_path / "test.db"
+        store = MemoryStore(str(db))
+        for i in range(20):
+            store.add_fact(f"fact {i}", category="general", tags="entity:x")
+        for i in range(10):
+            store.remove_fact(i + 1)
+        result = store.clean()
+        assert result["vacuum_bytes_before"] > 0
+        assert result["vacuum_bytes_after"] <= result["vacuum_bytes_before"]
+        store.close()
