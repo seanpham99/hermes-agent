@@ -328,9 +328,9 @@ class TestMemSlashCommandWiring:
         mem_cmd = next((c for c in COMMAND_REGISTRY if c.name == "holographic-memory"), None)
         assert mem_cmd is not None
         assert mem_cmd.description == (
-            "Inspect holographic memory (tree / list / probe / search)"
+            "Inspect holographic memory (tree / list / probe / search / clean)"
         )
-        assert mem_cmd.subcommands == ("tree", "list", "probe", "search")
+        assert mem_cmd.subcommands == ("tree", "list", "probe", "search", "clean")
 
     def test_handle_mem_command_exists(self):
         """Test _handle_mem_command is defined in the mixin."""
