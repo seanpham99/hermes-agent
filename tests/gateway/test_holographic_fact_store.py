@@ -74,10 +74,10 @@ class TestFactStoreListTable:
     def test_list_json_format(self, provider):
         """Test default JSON format returns structured data."""
         provider._handle_fact_store(
-            {"action": "add", "content": "test fact 1", "category": "general"}
+            {"action": "add", "content": "Node.js is a JavaScript runtime", "category": "tool"}
         )
         provider._handle_fact_store(
-            {"action": "add", "content": "test fact 2", "category": "tool"}
+            {"action": "add", "content": "Tax deadline is March 31 2026", "category": "user_pref"}
         )
 
         result = provider._handle_fact_store(
@@ -93,10 +93,10 @@ class TestFactStoreListTable:
     def test_list_table_format(self, provider):
         """Test table format returns Rich-rendered table."""
         provider._handle_fact_store(
-            {"action": "add", "content": "test fact 1", "category": "general"}
+            {"action": "add", "content": "Python is a programming language", "category": "tool"}
         )
         provider._handle_fact_store(
-            {"action": "add", "content": "test fact 2", "category": "tool", "tags": "tag1,tag2"}
+            {"action": "add", "content": "Hermes Agent runs on Linux and macOS", "category": "project", "tags": "tag1,tag2"}
         )
 
         result = provider._handle_fact_store(
@@ -110,8 +110,8 @@ class TestFactStoreListTable:
         assert "Tags" in result
         assert "Created" in result
         assert "Content" in result
-        assert "test fact 1" in result
-        assert "test fact 2" in result
+        assert "Python" in result
+        assert "Hermes Agent" in result
         assert "tag1" in result
 
     def test_list_empty(self, provider):
