@@ -185,8 +185,10 @@ class TestFactStoreListTable:
             {"action": "list", "output_format": "table", "limit": 10}
         )
 
-        # Rich color codes: green for high trust, yellow for medium, red for low
-        assert "\x1b[" in result  # ANSI escape codes present from Rich
+        # Content check: trust scores rendered (color codes absent when non-TTY)
+        assert "0.80" in result or "0.8" in result
+        assert "0.50" in result or "0.5" in result
+        assert "0.20" in result or "0.2" in result
 
 
 # ── TestRenderFactsTable ─────────────────────────────────────────────────
@@ -317,13 +319,13 @@ class TestHolographicTreeScript:
 # ── TestSlashCommandWiring ──────────────────────────────────────────────
 
 class TestMemSlashCommandWiring:
-    """Test that /mem command is registered and wired correctly."""
+    """Test that /holographic-memory command is registered and wired correctly."""
 
     def test_mem_command_registered(self):
-        """Test /mem is in COMMAND_REGISTRY."""
+        """Test /holographic-memory is in COMMAND_REGISTRY."""
         from hermes_cli.commands import COMMAND_REGISTRY
 
-        mem_cmd = next((c for c in COMMAND_REGISTRY if c.name == "mem"), None)
+        mem_cmd = next((c for c in COMMAND_REGISTRY if c.name == "holographic-memory"), None)
         assert mem_cmd is not None
         assert mem_cmd.description == (
             "Inspect holographic memory (tree / list / probe / search)"
@@ -339,11 +341,11 @@ class TestMemSlashCommandWiring:
 
     @pytest.mark.asyncio
     async def test_mem_list_dispatch(self, mock_holographic_provider):
-        """Test /mem list dispatches to fact_store list with correct args."""
+        """Test /holographic-memory list dispatches to fact_store list with correct args."""
         mock_holographic_provider.handle_tool_call.return_value = "TABLE_OUTPUT"
 
         runner = _make_runner()
-        event = _make_event("/mem list --limit 5 --format table")
+        event = _make_event("/holographic-memory list --limit 5 --format table")
 
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
@@ -359,11 +361,11 @@ class TestMemSlashCommandWiring:
 
     @pytest.mark.asyncio
     async def test_mem_probe_dispatch(self, mock_holographic_provider):
-        """Test /mem probe dispatches to fact_store probe."""
+        """Test /holographic-memory probe dispatches to fact_store probe."""
         mock_holographic_provider.handle_tool_call.return_value = '{"facts": []}'
 
         runner = _make_runner()
-        event = _make_event("/mem probe tax")
+        event = _make_event("/holographic-memory probe tax")
 
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
@@ -377,11 +379,11 @@ class TestMemSlashCommandWiring:
 
     @pytest.mark.asyncio
     async def test_mem_search_dispatch(self, mock_holographic_provider):
-        """Test /mem search dispatches to fact_store search."""
+        """Test /holographic-memory search dispatches to fact_store search."""
         mock_holographic_provider.handle_tool_call.return_value = '{"facts": []}'
 
         runner = _make_runner()
-        event = _make_event("/mem search penalty")
+        event = _make_event("/holographic-memory search penalty")
 
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
@@ -395,9 +397,9 @@ class TestMemSlashCommandWiring:
 
     @pytest.mark.asyncio
     async def test_mem_tree_runs_subprocess(self, mock_holographic_provider):
-        """Test /mem tree launches holographic_tree.py via subprocess."""
+        """Test /holographic-memory tree launches holographic_tree.py via subprocess."""
         runner = _make_runner()
-        event = _make_event("/mem tree")
+        event = _make_event("/holographic-memory tree")
 
         from gateway.slash_commands import GatewaySlashCommandsMixin
         runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)

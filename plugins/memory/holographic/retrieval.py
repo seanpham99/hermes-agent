@@ -119,41 +119,19 @@ class FactRetriever:
     ) -> list[dict]:
         """Compositional entity query using HRR algebra.
 
-        Unbinds entity from memory bank to extract associated content.
-        This is NOT keyword search — it uses algebraic structure to find facts
-        where the entity plays a structural role.
-
-        Falls back to FTS5 search if numpy unavailable.
+        Pre-filters facts by exact entity tag match, then HRR-ranks within
+        that subset. Falls back to FTS5 search if numpy unavailable.
         """
         if not hrr._HAS_NUMPY:
-            # Fallback to keyword search on entity name
             return self.search(entity, category=category, limit=limit)
 
         conn = self.store._conn
 
-        # Encode entity as role-bound vector
-        role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
-        entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
-        probe_key = hrr.bind(entity_vec, role_entity)
+        # Pre-filter: facts tagged with entity:<entity>
+        entity_tag = f"entity:{entity.lower()}"
+        where = "WHERE hrr_vector IS NOT NULL AND tags LIKE ?"
+        params: list = [f"%{entity_tag}%"]
 
-        # Try category-specific bank first, then all facts
-        if category:
-            bank_name = f"cat:{category}"
-            bank_row = conn.execute(
-                "SELECT vector FROM memory_banks WHERE bank_name = ?",
-                (bank_name,),
-            ).fetchone()
-            if bank_row:
-                bank_vec = hrr.bytes_to_phases(bank_row["vector"])
-                extracted = hrr.unbind(bank_vec, probe_key)
-                # Use extracted signal to score individual facts
-                return self._score_facts_by_vector(
-                    extracted, category=category, limit=limit
-                )
-
-        # Score against individual fact vectors directly
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
         if category:
             where += " AND category = ?"
             params.append(category)
@@ -170,8 +148,12 @@ class FactRetriever:
         ).fetchall()
 
         if not rows:
-            # Final fallback: keyword search
             return self.search(entity, category=category, limit=limit)
+
+        # Encode entity as role-bound HRR vector for scoring
+        role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
+        entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
+        probe_key = hrr.bind(entity_vec, role_entity)
 
         scored = []
         for row in rows:

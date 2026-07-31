@@ -1853,10 +1853,11 @@ class CLICommandsMixin:
         print(out)
 
     def _handle_mem_command(self, cmd: str):
-        """Handle /mem — inspect holographic memory (tree / list / probe / search).
+        """Handle /holographic-memory — inspect holographic memory (tree / list / probe / search).
 
         Mirror of gateway/slash_commands.py._handle_mem_command for
-        interactive CLI/TUI surfaces.
+        interactive CLI/TUI surfaces. The tree viewer renders once and exits
+        (non-interactive); subcommands list/probe/search print their output.
         """
         import shlex
         import subprocess
@@ -1872,7 +1873,7 @@ class CLICommandsMixin:
             print(
                 "Holographic memory is not the active memory provider. "
                 f"Active provider is '{active_name or 'none'}'. "
-                "Set memory.provider: holographic in config.yaml to use /mem."
+                "Set memory.provider: holographic in config.yaml to use /holographic-memory."
             )
             return
 
@@ -1887,7 +1888,16 @@ class CLICommandsMixin:
                 plugin_dir = Path(__file__).parent.parent / "plugins" / "memory" / "holographic"
                 tree_script = plugin_dir / "scripts" / "holographic_tree.py"
                 try:
-                    subprocess.run([sys.executable, str(tree_script)], check=False)
+                    proc = subprocess.run(
+                        [sys.executable, str(tree_script)],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    # The slash worker redirects stdout to a buffer and strips
+                    # ANSI at the choke point, but the child must not inherit the
+                    # worker's real fd 1 (the JSON-RPC pipe) or its output would
+                    # bypass the buffer and be dropped by the drain thread.
+                    out = proc.stdout or proc.stderr or "Tree viewer exited with no output."
+                    print(out, end="")
                 except Exception as e:
                     print(f"Error running tree viewer: {e}")
                 return
@@ -1932,7 +1942,7 @@ class CLICommandsMixin:
                 print(res)
                 return
 
-            print("Unknown /mem subcommand. Use: tree, list, probe <entity>, search <query>.")
+            print("Unknown /holographic-memory subcommand. Use: tree, list, probe <entity>, search <query>.")
         finally:
             provider.shutdown()
 

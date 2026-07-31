@@ -51,7 +51,7 @@ async def test_handle_mem_command_list_format_table(mock_holographic_provider):
     mock_holographic_provider.handle_tool_call.return_value = "TABLE_OUTPUT"
     
     runner = _make_runner()
-    event = _make_event("/mem list --limit 5 --format table")
+    event = _make_event("/holographic-memory list --limit 5 --format table")
     
     from gateway.slash_commands import GatewaySlashCommandsMixin
     runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
@@ -68,7 +68,7 @@ async def test_handle_mem_command_list_format_table(mock_holographic_provider):
 @pytest.mark.asyncio
 async def test_handle_mem_command_tree_subprocess(mock_holographic_provider):
     runner = _make_runner()
-    event = _make_event("/mem tree")
+    event = _make_event("/holographic-memory tree")
     
     from gateway.slash_commands import GatewaySlashCommandsMixin
     runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
@@ -90,7 +90,7 @@ async def test_handle_mem_command_probe(mock_holographic_provider):
     mock_holographic_provider.handle_tool_call.return_value = '{"facts": []}'
     
     runner = _make_runner()
-    event = _make_event("/mem probe my_entity")
+    event = _make_event("/holographic-memory probe my_entity")
     
     from gateway.slash_commands import GatewaySlashCommandsMixin
     runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)
@@ -107,7 +107,7 @@ async def test_handle_mem_command_search(mock_holographic_provider):
     mock_holographic_provider.handle_tool_call.return_value = '{"facts": []}'
     
     runner = _make_runner()
-    event = _make_event("/mem search some query terms")
+    event = _make_event("/holographic-memory search some query terms")
     
     from gateway.slash_commands import GatewaySlashCommandsMixin
     runner._handle_mem_command = GatewaySlashCommandsMixin._handle_mem_command.__get__(runner)

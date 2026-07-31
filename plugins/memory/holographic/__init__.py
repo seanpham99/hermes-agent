@@ -533,7 +533,7 @@ def _render_facts_table(facts: list) -> str:
     if not facts:
         return "No facts found."
 
-    console = Console(record=True, width=140, force_terminal=True)
+    console = Console(record=True, width=140)
     table = Table(show_header=True, header_style="bold", show_lines=False, pad_edge=False)
     table.add_column("ID", style="dim", width=5, justify="right")
     table.add_column("Trust", width=8, justify="center")
@@ -564,7 +564,15 @@ def _render_facts_table(facts: list) -> str:
 
     with console.capture() as capture:
         console.print(table)
-    return capture.get()
+    raw = capture.get()
+    # Strip ANSI escapes — Rich may emit them (TTY detection, COLORTERM env,
+    # force_terminal) and downstream consumers (TUI, gateway, slash worker)
+    # may or may not strip. Strip at the source so every path gets clean text.
+    try:
+        from tools.ansi_strip import strip_ansi
+        return strip_ansi(raw)
+    except ImportError:
+        return raw
 
 def register(ctx) -> None:
     """Register the holographic memory provider with the plugin system."""

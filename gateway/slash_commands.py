@@ -3461,14 +3461,12 @@ class GatewaySlashCommandsMixin:
         return out
 
     async def _handle_mem_command(self, event: MessageEvent) -> str:
-        """Handle /mem — inspect holographic memory (tree / list / probe / search).
+        """Handle /holographic-memory — inspect holographic memory (tree / list / probe / search).
 
-        Subcommands mirror fact_store actions with a TUI-friendly output:
-          /mem tree       Interactive tree viewer (CLI)
-          /mem list <N>  Table of facts (default 10, use --limit N)
-          /mem probe <entity>  Probe and display facts for entity
-          /mem search <query>  Search facts matching query
-        Runs as a blocking subprocess; the tree viewer is interactive.
+          /holographic-memory tree       Render full memory tree (one-shot, non-interactive)
+          /holographic-memory list <N>  Table of facts (default 10, use --limit N)
+          /holographic-memory probe <entity>  Probe and display facts for entity
+          /holographic-memory search <query>  Search facts matching query
         """
         from plugins.memory import load_memory_provider, _get_active_memory_provider
 
@@ -3481,7 +3479,7 @@ class GatewaySlashCommandsMixin:
             return (
                 "Holographic memory is not the active memory provider. "
                 f"Active provider is '{active_name or 'none'}'. "
-                "Set memory.provider: holographic in config.yaml to use /mem."
+                "Set memory.provider: holographic in config.yaml to use /holographic-memory."
             )
 
         provider = load_memory_provider("holographic")
@@ -3533,7 +3531,7 @@ class GatewaySlashCommandsMixin:
                     "query": query,
                 })
 
-            return ("Unknown /mem subcommand. Use: tree, list, probe <entity>, "
+            return ("Unknown /holographic-memory subcommand. Use: tree, list, probe <entity>, "
                     "search <query>.")
         finally:
             provider.shutdown()
