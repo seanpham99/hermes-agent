@@ -157,11 +157,9 @@ class TestCloseSemantics:
 class TestSemanticEmbeddings:
     @staticmethod
     def _fake_embedder(monkeypatch):
-        import numpy as np
-
         monkeypatch.setattr(
             "plugins.memory.holographic.embeddings.get_embedder",
-            lambda: lambda texts: [np.ones(384, dtype=np.float32) for _ in texts],
+            lambda: lambda texts: [[1.0] * 384 for _ in texts],
         )
 
     def test_add_fact_persists_sbert_vector(self, db_path, monkeypatch):

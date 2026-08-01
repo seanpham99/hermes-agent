@@ -5,6 +5,7 @@ No hard dependency — import this module safely in any environment.
 """
 
 import logging
+import math
 import struct
 from typing import Callable, Optional, Sequence
 
@@ -62,27 +63,28 @@ def embedding_dim():
 
 def pack_vector(vec):
     # type: (...) -> bytes
-    """Pack a float32 vector into a BLOB."""
-    import numpy as np
-
-    arr = np.asarray(vec, dtype=np.float32)
-    return struct.pack(f"{len(arr)}f", *arr)
+    """Pack a float32 vector into a BLOB without requiring NumPy."""
+    values = [float(value) for value in vec]
+    return struct.pack(f"{len(values)}f", *values)
 
 
 def unpack_vector(blob):
     # type: (bytes) -> ...
-    """Unpack a BLOB into a float32 numpy array."""
-    import numpy as np
-
+    """Unpack a BLOB into a list of float32 values."""
     n = len(blob) // 4
-    return np.array(struct.unpack(f"{n}f", blob), dtype=np.float32)
+    return list(struct.unpack(f"{n}f", blob))
 
 
 def cosine_similarity(a, b):
     # type: (...) -> float
-    """Cosine similarity between two numpy vectors. Both assumed normalized."""
-    import numpy as np
-
-    return float(
-        np.dot(np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32))
-    )
+    """Cosine similarity between vectors. Both assumed normalized."""
+    if len(a) != len(b):
+        raise ValueError("vectors must have equal dimensions")
+    a_values = [float(value) for value in a]
+    b_values = [float(value) for value in b]
+    a_norm = math.sqrt(math.fsum(value * value for value in a_values))
+    b_norm = math.sqrt(math.fsum(value * value for value in b_values))
+    if not a_norm or not b_norm:
+        return 0.0
+    dot = math.fsum(x * y for x, y in zip(a_values, b_values))
+    return dot / (a_norm * b_norm)
