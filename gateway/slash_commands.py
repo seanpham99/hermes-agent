@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -1840,11 +1841,7 @@ class GatewaySlashCommandsMixin:
                                 enrich_model_switch_warnings_for_gateway,
                             )
 
-                            # Offload: merge_preflight_compression_warning()
-                            # calls the sync resolve_display_context_length()
-                            # provider probe ladder — must not run on the loop.
-                            await asyncio.to_thread(
-                                enrich_model_switch_warnings_for_gateway,
+                            enrich_model_switch_warnings_for_gateway(
                                 result,
                                 _self,
                                 session_key=_session_key,
@@ -2015,7 +2012,7 @@ class GatewaySlashCommandsMixin:
                         lines = [t("gateway.model.switched", model=format_model_for_display(result.new_model))]
                         lines.append(t("gateway.model.provider_label", provider=plabel))
                         mi = result.model_info
-                        from hermes_cli.model_switch import resolve_display_context_length_async
+                        from hermes_cli.model_switch import resolve_display_context_length
                         _sw_config_ctx = None
                         _sw_model_cfg = {}
                         try:
@@ -2029,7 +2026,7 @@ class GatewaySlashCommandsMixin:
                             pass
                         if not isinstance(_sw_model_cfg, dict):
                             _sw_model_cfg = {}
-                        ctx = await resolve_display_context_length_async(
+                        ctx = resolve_display_context_length(
                             result.new_model,
                             result.target_provider,
                             base_url=result.base_url or current_base_url or "",
@@ -2149,11 +2146,7 @@ class GatewaySlashCommandsMixin:
                 enrich_model_switch_warnings_for_gateway,
             )
 
-            # Offload: merge_preflight_compression_warning() calls the sync
-            # resolve_display_context_length() provider probe ladder — must
-            # not run on the loop.
-            await asyncio.to_thread(
-                enrich_model_switch_warnings_for_gateway,
+            enrich_model_switch_warnings_for_gateway(
                 result,
                 self,
                 session_key=session_key,
@@ -2341,7 +2334,7 @@ class GatewaySlashCommandsMixin:
             # Context: always resolve via the provider-aware chain so Codex OAuth,
             # Copilot, and Nous-enforced caps win over the raw models.dev entry.
             mi = result.model_info
-            from hermes_cli.model_switch import resolve_display_context_length_async
+            from hermes_cli.model_switch import resolve_display_context_length
             _sw2_config_ctx = None
             _sw2_model_cfg = {}
             try:
@@ -2355,7 +2348,7 @@ class GatewaySlashCommandsMixin:
                 pass
             if not isinstance(_sw2_model_cfg, dict):
                 _sw2_model_cfg = {}
-            ctx = await resolve_display_context_length_async(
+            ctx = resolve_display_context_length(
                 result.new_model,
                 result.target_provider,
                 base_url=result.base_url or current_base_url or "",
@@ -3467,6 +3460,92 @@ class GatewaySlashCommandsMixin:
                    "reject <id>, approval <on|off>.")
         return out
 
+    async def _handle_mem_command(self, event: MessageEvent) -> str:
+        """Handle /holographic-memory — inspect holographic memory (tree / list / probe / search).
+
+          /holographic-memory tree       Render full memory tree (one-shot, non-interactive)
+          /holographic-memory list <N>  Table of facts (default 10, use --limit N)
+          /holographic-memory probe <entity>  Probe and display facts for entity
+          /holographic-memory search <query>  Search facts matching query
+        """
+        from plugins.memory import load_memory_provider, _get_active_memory_provider
+
+        raw_args = event.get_command_args().strip()
+        args = shlex.split(raw_args) if raw_args else []
+        subcommand = args[0] if args else "tree"
+
+        active_name = _get_active_memory_provider()
+        if active_name != "holographic":
+            return (
+                "Holographic memory is not the active memory provider. "
+                f"Active provider is '{active_name or 'none'}'. "
+                "Set memory.provider: holographic in config.yaml to use /holographic-memory."
+            )
+
+        provider = load_memory_provider("holographic")
+        if not provider:
+            return "Failed to load holographic memory provider."
+
+        provider.initialize("slash-command-session")
+        try:
+            if subcommand == "tree":
+                plugin_dir = Path(__file__).parent.parent / "plugins" / "memory" / "holographic"
+                tree_script = plugin_dir / "scripts" / "holographic_tree.py"
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    [sys.executable, str(tree_script)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                out = proc.stdout or proc.stderr or "Tree viewer exited with no output."
+                # Rich may emit ANSI when the child detects a TTY or
+                # COLORTERM is set; strip so every gateway surface gets
+                # clean text (the CLI slash worker strips downstream).
+                try:
+                    from tools.ansi_strip import strip_ansi
+                    out = strip_ansi(out)
+                except ImportError:
+                    pass
+                return out
+
+            if subcommand == "list":
+                output_format = "table"
+                limit = 10
+                remaining = args[1:]
+                i = 0
+                while i < len(remaining):
+                    if remaining[i] in ("--limit", "-n") and i + 1 < len(remaining):
+                        limit = int(remaining[i + 1])
+                        i += 2
+                    elif remaining[i] == "--format" and i + 1 < len(remaining):
+                        output_format = remaining[i + 1]
+                        i += 2
+                    else:
+                        i += 1
+                return provider.handle_tool_call("fact_store", {
+                    "action": "list",
+                    "output_format": output_format,
+                    "limit": limit,
+                })
+
+            if subcommand == "probe" and len(args) >= 2:
+                entity = args[1]
+                return provider.handle_tool_call("fact_store", {
+                    "action": "probe",
+                    "entity": entity,
+                })
+
+            if subcommand == "search" and len(args) >= 2:
+                query = " ".join(args[1:])
+                return provider.handle_tool_call("fact_store", {
+                    "action": "search",
+                    "query": query,
+                })
+
+            return ("Unknown /holographic-memory subcommand. Use: tree, list, probe <entity>, "
+                    "search <query>.")
+        finally:
+            provider.shutdown()
+
     async def _handle_skills_command(self, event: MessageEvent) -> str:
         """Handle /skills on the gateway — pending skill-write review only.
 
@@ -3798,28 +3877,6 @@ class GatewaySlashCommandsMixin:
         return t("gateway.footer.saved", state=state, example=example)
 
     async def _handle_compress_command(self, event: MessageEvent) -> str:
-        """Profile-scoping wrapper around manual /compress.
-
-        Multiplexed gateways resolve credentials through the fail-closed
-        per-profile secret scope (``agent.secret_scope``, Workstream A). The
-        agent turn installs it via ``_run_agent``'s wrapper, but slash-command
-        dispatch does not — so manual /compress reached the compressor's
-        provider resolution unscoped and died with ``UnscopedSecretError``
-        (``get_secret('OPENROUTER_BASE_URL') called with no profile secret
-        scope active``). Install the source profile's scope around the whole
-        handler, mirroring ``_run_agent``. Single-profile gateways skip this
-        — zero behavior change.
-        """
-        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
-            return await self._handle_compress_command_inner(event)
-
-        from gateway.run import _profile_runtime_scope
-
-        profile_home = self._resolve_profile_home_for_source(event.source)
-        with _profile_runtime_scope(profile_home):
-            return await self._handle_compress_command_inner(event)
-
-    async def _handle_compress_command_inner(self, event: MessageEvent) -> str:
         """Handle /compress command -- manually compress conversation context.
 
         Accepts an optional focus topic: ``/compress <focus>`` guides the
@@ -4005,13 +4062,9 @@ class GatewaySlashCommandsMixin:
                 if not compressor.has_content_to_compress(head):
                     return t("gateway.compress.nothing_to_do")
 
-                # _run_in_executor_with_context (not a bare run_in_executor):
-                # the profile secret scope installed by the wrapper is a
-                # contextvar, and the default-executor hop would drop it —
-                # the compressor's aux-client provider resolution would then
-                # read credentials unscoped and fail closed under
-                # multiplexing.
-                compressed, _ = await self._run_in_executor_with_context(
+                loop = asyncio.get_running_loop()
+                compressed, _ = await loop.run_in_executor(
+                    None,
                     lambda: tmp_agent._compress_context(
                         head,
                         "",
@@ -4341,9 +4394,7 @@ class GatewaySlashCommandsMixin:
             from hermes_state import format_session_db_unavailable
             return format_session_db_unavailable(prefix=t("gateway.shared.session_db_unavailable_prefix"))
 
-        source = await asyncio.to_thread(
-            self._normalize_source_for_session_key, event.source
-        )
+        source = event.source
         session_key = self._session_key_for_source(source)
         raw_args = event.get_command_args().strip()
         try:
@@ -4366,12 +4417,7 @@ class GatewaySlashCommandsMixin:
 
         async def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
-            widen = allow_all and self._resume_caller_is_admin(source)
-            sessions = await self._session_db.list_sessions_rich(
-                source=user_source,
-                session_key=None if widen else session_key,
-                limit=10,
-            )
+            sessions = await self._session_db.list_sessions_rich(source=user_source, limit=10)
             return [s for s in sessions if s.get("title")][:10]
 
         if not name:
@@ -4515,6 +4561,7 @@ class GatewaySlashCommandsMixin:
             query_session_listing,
         )
 
+        source = event.source
         raw_args = event.get_command_args().strip()
         try:
             include_all, include_unnamed, target, search_query = (
@@ -4530,11 +4577,6 @@ class GatewaySlashCommandsMixin:
             resume_event = dataclasses.replace(event, text=f"/resume {target}")
             return await self._handle_resume_command(resume_event)
 
-        source = await asyncio.to_thread(
-            self._normalize_source_for_session_key, event.source
-        )
-        session_key = self._session_key_for_source(source)
-
         # A cross-origin listing (`/sessions all`) is honored only for an
         # admin, mirroring the `/resume --all` override. `all` is just a parsed
         # user argument, so without this gate any caller could run
@@ -4546,7 +4588,6 @@ class GatewaySlashCommandsMixin:
             query_session_listing,
             getattr(self._session_db, "_db", self._session_db),
             source=source.platform.value if source.platform else None,
-            session_key=None if cross_origin else session_key,
             current_session_id=current_entry.session_id,
             include_all_sources=cross_origin,
             include_unnamed=include_unnamed,

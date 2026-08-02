@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from utils import is_truthy_value
-from hermes_constants import INDICATOR_STYLES
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +226,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("skin", "Show or change the display skin/theme", "Configuration",
                cli_only=True, args_hint="[name]"),
     CommandDef("indicator", "Pick the TUI busy-indicator style", "Configuration",
-               cli_only=True, args_hint=f"[{'|'.join(INDICATOR_STYLES)}]",
-               subcommands=INDICATOR_STYLES),
+               cli_only=True, args_hint="[kaomoji|emoji|unicode|ascii]",
+               subcommands=("kaomoji", "emoji", "unicode", "ascii")),
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
     CommandDef("wake", "Toggle the 'Hey Hermes' wake word listener", "Configuration",
@@ -252,6 +251,12 @@ COMMAND_REGISTRY: list[CommandDef] = [
                "Tools & Skills",
                args_hint="[pending|approve|reject|approval] [id|on|off]",
                subcommands=("pending", "approve", "reject", "approval")),
+    CommandDef("holographic-memory", "Inspect holographic memory (tree / list / probe / search)",
+               "Tools & Skills",
+               aliases=("holographic-mem",),
+               args_hint="[tree|list <N>|probe <entity>|search <query>]",
+               subcommands=("tree", "list", "probe", "search"),
+               busy_policy="dispatch"),
     CommandDef("bundles", "List skill bundles (aliases /<name> for multiple skills)",
                "Tools & Skills", execute="bundles"),
     CommandDef("pet", "Toggle or adopt a petdex mascot (/pet, /pet list, /pet <slug>)", "Tools & Skills",
