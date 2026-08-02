@@ -181,6 +181,65 @@ class TestSemanticEmbeddings:
             assert len(store.list_facts(category="load", limit=10)) == 2
 
 
+class TestBackfillAndHousekeeping:
+    def test_backfill_sbert_vectors_computes_missing_embeddings(self, db_path):
+        from plugins.memory.holographic import HolographicMemoryProvider
+
+        provider = HolographicMemoryProvider(config={"db_path": str(db_path)})
+        provider.initialize("session-backfill")
+        try:
+            store = provider._store
+            # Manually insert a fact with NULL sbert_vector
+            with store._lock:
+                with store._conn:
+                    cur = store._conn.execute(
+                        "INSERT INTO facts (category, content, trust_score, retrieval_count, helpful_count, sbert_vector) "
+                        "VALUES (?, ?, 0.8, 0, 0, NULL) RETURNING fact_id",
+                        ("project", "Hermes supports SBERT vector backfill"),
+                    )
+                    fact_id = cur.fetchone()[0]
+
+            # Verify sbert_vector is NULL initially
+            row = store._conn.execute("SELECT sbert_vector FROM facts WHERE fact_id = ?", (fact_id,)).fetchone()
+            assert row[0] is None
+
+            # Execute backfill on provider
+            count = provider.backfill_sbert_vectors()
+            assert count == 1
+
+            # Verify sbert_vector is now populated
+            row = store._conn.execute("SELECT sbert_vector FROM facts WHERE fact_id = ?", (fact_id,)).fetchone()
+            assert row[0] is not None
+        finally:
+            provider.shutdown()
+
+    def test_penalize_trust_reduces_score_and_filters_low_trust(self, db_path):
+        from plugins.memory.holographic import HolographicMemoryProvider
+
+        provider = HolographicMemoryProvider(config={"db_path": str(db_path)})
+        provider.initialize("session-penalize")
+        try:
+            store = provider._store
+            fact_id = store.add_fact("Transient temporary debug output", category="auto_capture")
+            
+            # Initial trust is 0.5
+            row = store._conn.execute("SELECT trust_score FROM facts WHERE fact_id = ?", (fact_id,)).fetchone()
+            assert row["trust_score"] == 0.5
+
+            # Penalize trust by -0.3 using update_fact trust_delta
+            store.update_fact(fact_id, trust_delta=-0.3)
+            
+            row = store._conn.execute("SELECT trust_score FROM facts WHERE fact_id = ?", (fact_id,)).fetchone()
+            assert row["trust_score"] == 0.2
+
+            # Fact with trust_score < 0.3 is excluded from default search
+            results = store.search_facts("Transient temporary", min_trust=0.3)
+            assert not any(f["fact_id"] == fact_id for f in results)
+        finally:
+            provider.shutdown()
+
+
+
 class TestConcurrency:
     def test_concurrent_multi_instance_writers(self, db_path):
         """Many instances writing from many threads must never hit

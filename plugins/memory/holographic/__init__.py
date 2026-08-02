@@ -225,6 +225,12 @@ class HolographicMemoryProvider(MemoryProvider):
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
 
+    def backfill_sbert_vectors(self) -> int:
+        """Backfill SBERT embeddings for facts missing them."""
+        if self._store:
+            return self._store.backfill_sbert_vectors()
+        return 0
+
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == "fact_store":
             return self._handle_fact_store(args)
