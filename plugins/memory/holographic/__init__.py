@@ -10,6 +10,8 @@ Config in $HERMES_HOME/config.yaml (profile-scoped):
     hermes-memory-store:
       db_path: $HERMES_HOME/memory_store.db   # omit to use the default
       auto_extract: false
+      auto_capture: false          # auto-capture tool observations via LLM mid-session
+      capture_interval: 5          # compress every N turns (auto_capture must be true)
       default_trust: 0.5
       min_trust_threshold: 0.3
       temporal_decay_half_life: 0
@@ -20,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
@@ -152,6 +154,8 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
+            {"key": "auto_capture", "description": "Auto-capture tool observations via LLM into facts mid-session", "default": "false", "choices": ["true", "false"]},
+            {"key": "capture_interval", "description": "Auto-capture: compress every N turns", "default": "5"},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -178,6 +182,44 @@ class HolographicMemoryProvider(MemoryProvider):
             hrr_dim=hrr_dim,
         )
         self._session_id = session_id
+
+        # -- Auto-capture config --------------------------------------------------
+        self._auto_capture = is_truthy_value(self._config.get("auto_capture", False))
+        self._capture_interval = 5
+        # Parse only when capture is enabled: an invalid persisted value must
+        # not prevent provider initialization while the feature is off.
+        if self._auto_capture:
+            try:
+                parsed = int(self._config.get("capture_interval", 5))
+            except (TypeError, ValueError):
+                logger.warning("Invalid capture_interval %r; defaulting to 5", self._config.get("capture_interval"))
+            else:
+                if parsed < 1:
+                    logger.warning("capture_interval %d out of range; defaulting to 5", parsed)
+                else:
+                    self._capture_interval = parsed
+        self._capture = None
+        self._msg_cursor = 0  # index of next message to process
+
+        if self._auto_capture:
+            try:
+                # Prefer the host-provided LLM facade threaded through
+                # initialize() kwargs (memory providers load via
+                # _ProviderCollector, which has no ctx.llm). Fall back to
+                # constructing PluginLlm only when the host doesn't supply one.
+                llm = kwargs.get("llm")
+                if llm is None:
+                    from agent.plugin_llm import PluginLlm
+                    llm = PluginLlm(plugin_id="hermes-memory-store")
+                from .capture import CaptureEngine
+                self._capture = CaptureEngine(
+                    store=self._store,
+                    llm=llm,
+                    interval=self._capture_interval,
+                )
+                logger.debug("Holographic auto-capture initialized")
+            except Exception as e:
+                logger.warning("Holographic auto-capture init failed: %s", e)
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -218,10 +260,17 @@ class HolographicMemoryProvider(MemoryProvider):
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        # Holographic memory stores explicit facts via tools, not auto-sync.
-        # The on_session_end hook handles auto-extraction if configured.
-        pass
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages: Optional[List[Dict[str, Any]]] = None) -> None:
+        # Auto-capture: feed new-turn messages to CaptureEngine
+        if self._auto_capture and self._capture is not None and messages:
+            try:
+                # Only process messages we haven't seen yet (delta since last sync_turn)
+                new_messages = messages[self._msg_cursor:]
+                if new_messages:
+                    self._capture.observe_turn(new_messages)
+                self._msg_cursor = len(messages)
+            except Exception as e:
+                logger.debug("Auto-capture observe_turn failed: %s", e)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
@@ -233,10 +282,38 @@ class HolographicMemoryProvider(MemoryProvider):
             return self._handle_fact_feedback(args)
         return tool_error(f"Unknown tool: {tool_name}")
 
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs,
+    ) -> None:
+        """Handle session rotation."""
+        self._session_id = new_session_id
+        if self._auto_capture and self._capture is not None:
+            # If genuinely new, or a resume (different transcript size),
+            # flush whatever was pending for the old session and reset cursor.
+            # (If it's a compression continuation, the transcript starts fresh too).
+            try:
+                self._capture.compress_and_store()
+            except Exception as e:
+                logger.debug("Auto-capture flush on switch failed: %s", e)
+            self._msg_cursor = 0
+            if reset or parent_session_id or rewound:
+                self._capture._turn_count = 0
+                self._capture._buffer.clear()
+
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        # is_truthy_value: the config schema declares auto_extract as a string
-        # enum ("false"/"true"), and a plain truthiness check treats the string
-        # "false" as enabled (#57682).
+        # Flush any remaining capture buffer before session ends
+        if self._auto_capture and self._capture is not None:
+            try:
+                self._capture.compress_and_store()
+            except Exception as e:
+                logger.debug("Auto-capture session-end flush failed: %s", e)
+        # Existing auto-extraction logic...
         if not is_truthy_value(self._config.get("auto_extract", False)):
             return
         if not self._store or not messages:
@@ -266,6 +343,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 logger.debug("Holographic shutdown close() failed: %s", e)
         self._store = None
         self._retriever = None
+        self._capture = None
 
     # -- Tool handlers -------------------------------------------------------
 
