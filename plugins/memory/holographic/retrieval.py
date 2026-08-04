@@ -116,9 +116,10 @@ class FactRetriever:
         # Sort by score descending, return top limit
         scored.sort(key=lambda x: x["score"], reverse=True)
         results = scored[:limit]
-        # Strip raw HRR bytes — callers expect JSON-serializable dicts
+        # Strip raw HRR + SBERT bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
+            fact.pop("sbert_vector", None)
         return results
 
     def probe(
@@ -190,6 +191,7 @@ class FactRetriever:
         for row in rows:
             fact = dict(row)
             fact_vec = hrr.bytes_to_phases(fact.pop("hrr_vector"), dim=self.hrr_dim)
+            fact.pop("sbert_vector", None)
             # Unbind probe key from fact to see if entity is structurally present
             residual = hrr.unbind(fact_vec, probe_key)
             # Compare residual against content signal
@@ -254,6 +256,7 @@ class FactRetriever:
         for row in rows:
             fact = dict(row)
             fact_vec = hrr.bytes_to_phases(fact.pop("hrr_vector"), dim=self.hrr_dim)
+            fact.pop("sbert_vector", None)
 
             # Check structural similarity: unbind entity from fact
             residual = hrr.unbind(fact_vec, entity_vec)
@@ -335,6 +338,7 @@ class FactRetriever:
         for row in rows:
             fact = dict(row)
             fact_vec = hrr.bytes_to_phases(fact.pop("hrr_vector"), dim=self.hrr_dim)
+            fact.pop("sbert_vector", None)
 
             entity_scores = []
             for probe_key in entity_residuals:
@@ -440,9 +444,9 @@ class FactRetriever:
                 contradiction_score = entity_overlap * (1.0 - (content_sim + 1.0) / 2.0)
 
                 if contradiction_score >= threshold:
-                    # Strip hrr_vector from output (not JSON serializable)
-                    f1_clean = {k: v for k, v in f1.items() if k != "hrr_vector"}
-                    f2_clean = {k: v for k, v in f2.items() if k != "hrr_vector"}
+                    # Strip hrr_vector + sbert_vector from output (not JSON serializable)
+                    f1_clean = {k: v for k, v in f1.items() if k not in ("hrr_vector", "sbert_vector")}
+                    f2_clean = {k: v for k, v in f2.items() if k not in ("hrr_vector", "sbert_vector")}
                     contradictions.append({
                         "fact_a": f1_clean,
                         "fact_b": f2_clean,
@@ -485,6 +489,7 @@ class FactRetriever:
         for row in rows:
             fact = dict(row)
             fact_vec = hrr.bytes_to_phases(fact.pop("hrr_vector"), dim=self.hrr_dim)
+            fact.pop("sbert_vector", None)
             sim = hrr.similarity(target_vec, fact_vec)
             fact["score"] = (sim + 1.0) / 2.0 * fact["trust_score"]
             scored.append(fact)
