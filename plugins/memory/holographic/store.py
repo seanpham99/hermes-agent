@@ -190,12 +190,18 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
-    ) -> int:
-        """Insert a fact and return its fact_id.
+        initial_trust: float | None = None,
+    ) -> dict:
+        """Insert a fact. Returns dict with fact_id and status.
 
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
-        the existing fact_id without modifying the row. Extracts entities from
-        the content and links them to the fact.
+        the existing fact_id with status "duplicate". If sentence-transformers
+        is available, also checks semantic similarity — merges near-duplicates
+        (cosine > 0.85) with status "merged".
+
+        ``initial_trust`` overrides the store default for this insert (e.g.
+        unconfirmed auto-captured facts start discounted so verified facts
+        outrank them in search; confirmed via fact_feedback later).
         """
         with self._lock:
             content = content.strip()
@@ -208,7 +214,14 @@ class MemoryStore:
                     INSERT INTO facts (content, category, tags, trust_score)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (
+                        content,
+                        category,
+                        tags,
+                        _clamp_trust(
+                            self.default_trust if initial_trust is None else initial_trust
+                        ),
+                    ),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
