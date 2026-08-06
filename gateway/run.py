@@ -59,6 +59,10 @@ from agent.conversation_compression import (
 )
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.i18n import t
+from agent.interrupt_compat import request_hard_interrupt
+from agent.turn_context import (
+    compression_made_progress as _compression_made_progress,
+)
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -113,6 +117,89 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+_HYGIENE_COOLDOWN_LADDER_MULTIPLIERS = (1, 3, 9)
+# Absolute ceiling on an escalated hygiene cooldown, mirroring
+# _RECONNECT_BACKOFF_CAP above: with an operator-raised base the multiplier
+# ladder alone would reach 9h (base 3600 -> 32400s), which is indistinguishable
+# from "compaction silently switched off". 1h is well past the point where a
+# retry is cheap and still recovers within a session.
+_HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
+
+
+def _hygiene_cooldown_for_failure(
+    gateway,
+    session_key: str,
+    base_cooldown_seconds: float,
+) -> float:
+    """Bump the hygiene failure streak and return the escalated cooldown.
+
+    The in-agent compressor escalates repeat summary timeouts 60 -> 300 -> 900s
+    (``ContextCompressor.record_timeout_failure``), but that ladder reads the
+    in-memory ``_consecutive_timeout_failures`` counter which
+    ``bind_session_state`` zeroes.  Session hygiene constructs a FRESH
+    ``AIAgent`` per run and re-binds state every time, so from the gateway the
+    streak is structurally always 0 and only the flat
+    ``hygiene_failure_cooldown_seconds`` could ever be recorded — a session
+    whose summary model always times out retried on that same fixed interval
+    forever (#79624).
+
+    The streak lives on ``PersistentState`` instead, which outlives the per-run
+    agent, so consecutive failures climb the ladder.  Multiplies the configured
+    base so operators who tuned ``hygiene_failure_cooldown_seconds`` keep their
+    first rung, then clamps to ``_HYGIENE_COOLDOWN_MAX_SECONDS``.
+    """
+    streak = 1
+    try:
+        state = gateway._session_state(session_key).persistent
+        state.hygiene_failure_streak += 1
+        streak = state.hygiene_failure_streak
+    except Exception as exc:
+        # The caller uses the return value to record the cooldown, so an
+        # escaping exception would mean NO cooldown at all (hot retry loop) —
+        # strictly worse than no escalation.  Degrade to the base rung.
+        logger.debug("hygiene failure streak update failed: %s", exc)
+    multiplier = _HYGIENE_COOLDOWN_LADDER_MULTIPLIERS[
+        min(streak, len(_HYGIENE_COOLDOWN_LADDER_MULTIPLIERS)) - 1
+    ]
+    return min(base_cooldown_seconds * multiplier, _HYGIENE_COOLDOWN_MAX_SECONDS)
+
+
+def _reset_hygiene_failure_streak(gateway, session_key: str) -> None:
+    """Clear the hygiene failure streak after a compression that reduced context.
+
+    Peeks rather than get-or-creates: writing a 0 that is already 0 must not
+    materialise a ``_sessions`` entry (those are never evicted).
+    """
+    try:
+        state = gateway._peek_session_state(session_key)
+        if state is not None:
+            state.persistent.hygiene_failure_streak = 0
+    except Exception as exc:
+        logger.debug("hygiene failure streak reset failed: %s", exc)
+
+
+def _record_hygiene_cooldown(gateway, session_id: str, cooldown_seconds: float) -> None:
+    """Persist a session-hygiene compression-failure cooldown to the state DB.
+
+    Uses the same ``compression_failure_cooldown_until`` column and
+    ``record_compression_failure_cooldown`` method that the in-conversation
+    compression path (``agent/context_compressor.py``) already uses, so the
+    cooldown survives gateway restarts (#74136).
+    """
+    import time as _time
+    session_db = getattr(gateway, "_session_db", None)
+    if session_db is None:
+        return
+    session_db = getattr(session_db, "_db", session_db)
+    recorder = getattr(session_db, "record_compression_failure_cooldown", None)
+    if recorder is None:
+        return
+    try:
+        recorder(session_id, _time.time() + cooldown_seconds)
+    except Exception as exc:
+        logger.debug("session hygiene cooldown persist failed: %s", exc)
 
 
 def _status_template_to_regex(template: str) -> str:
@@ -16357,9 +16444,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             )
                                             _hyg_cleanup_deferred = True
                                             if _hyg_failure_cooldown_seconds >= 0:
-                                                self._hygiene_compression_failure_cooldowns[
-                                                    session_entry.session_id
-                                                ] = time.time() + _hyg_failure_cooldown_seconds
+                                                _record_hygiene_cooldown(
+                                                    self, session_entry.session_id,
+                                                    _hygiene_cooldown_for_failure(
+                                                        self, session_key,
+                                                        _hyg_failure_cooldown_seconds,
+                                                    ),
+                                                )
+                                            from agent.session_activity import (
+                                                ActivityProvenance,
+                                            )
+                                            _stamp_hygiene_compression_provenance(
+                                                _hyg_agent,
+                                                "session hygiene compression timed out",
+                                                ActivityProvenance.AGENT_COMPRESSION_TIMEOUT,
+                                                "hygiene compression timeout "
+                                                "activity stamp failed",
+                                            )
                                             logger.warning(
                                                 "Session hygiene compression for session %s "
                                                 "made no progress for %.1fs "
@@ -16521,11 +16622,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                     # /compress to retry or /reset to start
                                     # fresh.
                                     _comp = getattr(_hyg_agent, "context_compressor", None)
-                                    if _comp is not None and getattr(_comp, "_last_compress_aborted", False):
+                                    _hyg_aborted = _comp is not None and getattr(
+                                        _comp, "_last_compress_aborted", False
+                                    )
+                                    if not _hyg_aborted:
+                                        # Only a run that materially reduced the
+                                        # request counts as recovery.  The
+                                        # degenerate "did not rotate or compact
+                                        # in place" branch above leaves both
+                                        # counts equal and is NOT aborted, so
+                                        # gating on "not aborted" alone would
+                                        # clear the streak on every wedged run
+                                        # and the cooldown could never escalate
+                                        # (#79624).  Reuse the canonical
+                                        # progress predicate rather than a
+                                        # hand-rolled token comparison: rows
+                                        # dropping is progress even when the
+                                        # summary keeps the token estimate flat,
+                                        # and a sub-5% token wobble is noise,
+                                        # not recovery (#39548).
+                                        if _compression_made_progress(
+                                            _msg_count, _new_count,
+                                            _approx_tokens, _new_tokens,
+                                        ):
+                                            _reset_hygiene_failure_streak(
+                                                self, session_key
+                                            )
+                                    if _hyg_aborted:
                                         if _hyg_failure_cooldown_seconds >= 0:
-                                            self._hygiene_compression_failure_cooldowns[
-                                                session_entry.session_id
-                                            ] = time.time() + _hyg_failure_cooldown_seconds
+                                            _record_hygiene_cooldown(
+                                                self, session_entry.session_id,
+                                                _hygiene_cooldown_for_failure(
+                                                    self, session_key,
+                                                    _hyg_failure_cooldown_seconds,
+                                                ),
+                                            )
+                                        from agent.session_activity import (
+                                            ActivityProvenance,
+                                        )
+                                        _stamp_hygiene_compression_provenance(
+                                            _hyg_agent,
+                                            "session hygiene compression aborted",
+                                            ActivityProvenance.AGENT_COMPRESSION_COOLDOWN,
+                                            "hygiene compression abort "
+                                            "activity stamp failed",
+                                        )
                                         _err = getattr(_comp, "_last_summary_error", None) or "unknown error"
                                         # Force-redact: provider exception text
                                         # may contain credentials; this message
@@ -24072,6 +24213,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if consumer is None:
                 return False
             if getattr(consumer, "final_response_sent", False):
+                # A successful finalize call is not proof the *content* was
+                # final: the edit may have carried only the last preview
+                # snapshot while the tail generated between that snapshot and
+                # stream completion never reached any API call (#71643).
+                # Reconcile the recorded turn-final payload against the
+                # completed response; only a demonstrable mismatch (False)
+                # overrides the flag — including payload-less multi-message
+                # split delivery (#78541). None (no record on a non-split
+                # legacy path) keeps the legacy trust so ambiguous-timeout
+                # dedup is not regressed.
+                matcher = getattr(consumer, "delivered_final_matches", None)
+                if callable(matcher):
+                    try:
+                        if matcher(final_text) is False:
+                            return False
+                    except Exception:
+                        pass
                 return True
             if previewed:
                 has_delivered_text = getattr(consumer, "has_delivered_text", None)
@@ -24758,6 +24916,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _content_delivered = bool(
                 _sc and getattr(_sc, "final_content_delivered", False)
             )
+            # #71643: a *successful* finalize edit can still carry only the
+            # last preview snapshot — deltas generated between that edit and
+            # stream completion never reach any API call, and both suppression
+            # flags are set from the call's success rather than its content.
+            # Reconcile the consumer's recorded turn-final payload against the
+            # completed response: on a demonstrable mismatch (False) neither
+            # final_response_sent nor final_content_delivered may suppress the
+            # normal final send. False also covers payload-less multi-message
+            # split delivery (#78541). None (no record on a non-split legacy
+            # path) keeps legacy trust; the failed-finalize family
+            # (#51828 / #33793) is unaffected because those paths leave the
+            # flags False or record the complete fallback payload.
+            _stale_finalized = False
+            if _content_delivered and not _is_empty_sentinel:
+                _matcher = getattr(_sc, "delivered_final_matches", None)
+                if callable(_matcher):
+                    try:
+                        _stale_finalized = _matcher(_final) is False
+                    except Exception:
+                        _stale_finalized = False
+                if _stale_finalized:
+                    _content_delivered = False
             # Plugin hooks (e.g. transform_llm_output) may have appended content
             # after streaming finished — when the response was transformed, always
             # send the final version so the appended content reaches the client.
@@ -24782,6 +24962,56 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _content_delivered,
                 )
                 response["already_sent"] = True
+            elif not _is_empty_sentinel and not _transformed and _stale_finalized and _sc is not None:
+                # Stale finalize (#71643): the streamed message holds only the
+                # last preview snapshot. Prefer editing it up to the complete
+                # response (same shape as the transformed branch below) so the
+                # user gets one corrected message; on edit failure fall through
+                # with already_sent unset so the normal final send delivers the
+                # complete text.
+                #
+                # Not valid for a multi-message split delivery: there
+                # ``message_id`` is only the LAST chunk, so editing it with the
+                # complete response would repeat every sealed head chunk's text
+                # inside the tail message. Fall through to the normal final send
+                # instead (#78541).
+                _sc_msg_id = _sc.message_id
+                _sc_adapter = getattr(_sc, "adapter", None)
+                if getattr(_sc, "_turn_split_delivery", False):
+                    logger.info(
+                        "Stale streamed finalize detected for session %s on a multi-message split; skipping the in-place reconciliation edit and delivering the complete response via normal final send (#78541).",
+                        session_key or "?",
+                    )
+                elif _sc_msg_id and _sc_msg_id != "__no_edit__" and _sc_adapter is not None:
+                    try:
+                        _reconcile_res = await _sc_adapter.edit_message(
+                            chat_id=source.chat_id,
+                            message_id=_sc_msg_id,
+                            content=_final,
+                            finalize=True,
+                        )
+                        if getattr(_reconcile_res, "success", True):
+                            response["already_sent"] = True
+                            logger.info(
+                                "Reconciled stale streamed finalize for session %s: edited message %s with the complete response (#71643).",
+                                session_key or "?", _sc_msg_id,
+                            )
+                        else:
+                            logger.warning(
+                                "Stale-finalize reconciliation edit failed for session %s (%s); sending complete response via normal final send.",
+                                session_key or "?",
+                                getattr(_reconcile_res, "error", None),
+                            )
+                    except Exception as _edit_err:
+                        logger.warning(
+                            "Stale-finalize reconciliation edit failed for session %s: %s; sending complete response via normal final send.",
+                            session_key or "?", _edit_err,
+                        )
+                else:
+                    logger.info(
+                        "Stale streamed finalize detected for session %s with no editable message; delivering complete response via normal final send (#71643).",
+                        session_key or "?",
+                    )
             elif not _is_empty_sentinel and _transformed and _sc is not None:
                 # Plugin hooks transformed the response after streaming — edit the
                 # existing streamed message instead of sending a duplicate.
